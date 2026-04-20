@@ -1,0 +1,59 @@
+# ═══════════════════════════════════════
+# BookGraph Agent 全局配置
+# ═══════════════════════════════════════
+
+obsidian:
+  vault_path: "/Users/rayzhang/Documents/知识体系"
+  graph_root: "📚 知识图谱"
+  
+  # 学科路径映射
+  discipline_paths:
+    政治哲学: "📚 知识图谱/政治哲学"
+    政治学: "📚 知识图谱/政治学"
+    经济学: "📚 知识图谱/经济学"
+    心理学: "📚 知识图谱/心理学"
+    历史学: "📚 知识图谱/历史学"
+    哲学: "📚 知识图谱/哲学"
+    管理学: "📚 知识图谱/管理学"
+    社会学: "📚 知识图谱/社会学"
+    文学: "📚 知识图谱/文学"
+    科学: "📚 知识图谱/科学"
+    技术: "📚 知识图谱/技术"
+
+  # 子目录结构
+  subdirectories:
+    books: "书籍图谱"
+    discipline: "学科图谱"
+    concepts: "概念词汇库"
+    beginner: "入门指南"
+
+llm:
+  # LLM 通过 Hermes Agent 工具调用，无需在此配置
+  # 使用 Hermes 内置模型 (qwen3.5-plus) 或 Claude Code
+  max_tokens: 16384
+  temperature: 0.3
+  chunk_size: 30000        # 每块字符数
+  max_retries: 3
+  retry_delay: 5
+
+batch:
+  max_workers: 3           # 并发数
+
+logging:
+  level: "INFO"
+  file: "logs/bookgraph.log"
+  max_size_mb: 10
+
+ocr:
+  engine: "paddleocr"      # marker / paddleocr / tesseract
+  language: "ch"
+  dpi: 300
+  timeout: 900
+
+parsing:
+  supported_formats:
+    - ".epub"
+    - ".pdf"
+    - ".mobi"
+  image_pdf_threshold: 0.8
+  min_text_length: 100

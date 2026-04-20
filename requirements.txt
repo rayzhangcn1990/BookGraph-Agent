@@ -1,0 +1,43 @@
+# ═══════════════════════════════════════
+# BookGraph Agent 依赖清单
+# ═══════════════════════════════════════
+
+# 书籍解析
+ebooklib==0.18
+pymupdf==1.23.8
+pymupdf4llm==0.0.10
+mobi==0.3.3
+beautifulsoup4==4.12.2
+lxml==4.9.3
+
+# OCR
+pytesseract==0.3.10
+paddlepaddle==2.5.2
+paddleocr==2.7.0
+Pillow==10.1.0
+opencv-python==4.8.1.78
+
+# LLM 调用
+anthropic==0.18.1
+openai==1.12.0
+tiktoken==0.6.0
+
+# 数据处理
+pydantic==2.5.3
+PyYAML==6.0.1
+python-dotenv==1.0.0
+tqdm==4.66.1
+tenacity==8.2.3
+
+# 测试
+pytest==7.4.3
+pytest-cov==4.1.0
+pytest-mock==3.12.0
+
+# 工具
+pathlib2==2.3.7
+chardet==5.2.0
+langdetect==1.0.9
+
+# 日志
+loguru==0.7.2
