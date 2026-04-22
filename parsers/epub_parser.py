@@ -201,30 +201,54 @@ class EpubParser(BaseParser):
     def _extract_title(self, soup: BeautifulSoup, doc_item) -> str:
         """
         从文档中提取标题
-        
+
         Args:
             soup: BeautifulSoup 对象
             doc_item: EPUB 文档项
-            
+
         Returns:
             str: 标题文本
         """
-        # 尝试从 h1 标签提取
-        h1 = soup.find('h1')
-        if h1 and h1.get_text(strip=True):
-            return h1.get_text(strip=True)
-        
+        # 尝试从 h1/h2/h3 标签提取（优先 h1）
+        for tag in ['h1', 'h2', 'h3']:
+            heading = soup.find(tag)
+            if heading:
+                text = heading.get_text(strip=True)
+                # 检查是否是有效标题（包含中文或有效内容）
+                if text and len(text) > 2 and (any('一' <= c <= '鿿' for c in text) or text[0].isalpha()):
+                    # 排除常见的占位符
+                    if text.lower() not in ['chapter', 'section', 'content', 'index', 'toc']:
+                        return text
+
+        # 尝试从第一个包含"章"、"节"、"第"的段落提取
+        body = soup.find('body') or soup
+        for element in body.find_all(['p', 'div', 'span']):
+            text = element.get_text(strip=True)
+            # 匹配章节标题格式：如 "第一章 xxx", "第1章 xxx", "第1节 xxx"
+            if text and ('章' in text[:10] or '节' in text[:10] or (text.startswith('第') and len(text) > 3)):
+                # 截取合理的标题长度（通常不超过50字）
+                if len(text) <= 50:
+                    return text
+                # 如果太长，可能包含正文，截取前30字
+                return text[:30].strip()
+
         # 尝试从 title 标签提取
-        title = soup.find('title')
-        if title and title.get_text(strip=True):
-            return title.get_text(strip=True)
-        
-        # 尝试从文件名提取
+        title_tag = soup.find('title')
+        if title_tag:
+            text = title_tag.get_text(strip=True)
+            if text and text.lower() not in ['untitled', 'no title', '']:
+                return text
+
+        # 尝试从文件名提取（但排除占位符）
         if hasattr(doc_item, 'file_name'):
             name = Path(doc_item.file_name).stem
-            if name and name.lower() not in ['chapter', 'section', 'content']:
-                return name
-        
+            # 排除常见的占位符文件名
+            placeholder_patterns = ['chapter', 'ch', 'index', 'split', 'section', 'content', 'page', 'nav', 'toc']
+            if name and not any(name.lower().startswith(p) for p in placeholder_patterns):
+                # 检查是否包含有效内容
+                if any('一' <= c <= '鿿' for c in name) or (name[0].isalpha() and len(name) > 3):
+                    return name
+
         return ""
 
     def _extract_body_content(self, soup: BeautifulSoup) -> str:

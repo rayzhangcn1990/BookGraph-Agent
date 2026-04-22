@@ -30,6 +30,10 @@ CONFIG = {
         'max_tokens': 16384,
         'temperature': 0.3,
         'chunk_size': 30000,
+        'timeout': 600,          # LLM 调用超时（秒）
+    },
+    'batch': {
+        'max_workers': 1,        # 并发数（串行处理）
     },
     'obsidian': {
         'vault_path': os.environ.get('OBSIDIAN_VAULT_PATH', '/Users/rayzhang/Documents/知识体系'),
@@ -38,16 +42,18 @@ CONFIG = {
     'ocr': {
         'enabled': True,
         'engine': 'paddleocr',
+        'timeout': 900,          # OCR 处理超时（秒）
     },
     'parsing': {
         'skip_scanned': False,
     },
 }
 
-# 学科映射
+# 学科映射 - 统一为一级学科
+# 政治哲学是政治学的子学科，不再作为独立学科
 DISCIPLINE_MAP = {
     '政治学': '政治学',
-    '政治哲学': '政治哲学',
+    '政治哲学': '政治学',  # 政治哲学归入政治学
 }
 
 def get_book_files(directory: str) -> list:

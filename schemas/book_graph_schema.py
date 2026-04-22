@@ -11,8 +11,7 @@ from datetime import datetime
 
 
 class DisciplineType(str, Enum):
-    """学科类型枚举"""
-    政治哲学 = "政治哲学"
+    """一级学科类型枚举"""
     政治学 = "政治学"
     经济学 = "经济学"
     心理学 = "心理学"
@@ -25,6 +24,17 @@ class DisciplineType(str, Enum):
     技术 = "技术"
 
 
+# 子学科映射 - 一级学科下的二级分类
+SUB_DISCIPLINES = {
+    "政治学": ["政治哲学", "比较政治", "国际关系", "政治经济学", "公共行政", "政治理论"],
+    "经济学": ["微观经济学", "宏观经济学", "政治经济学", "发展经济学", "行为经济学"],
+    "哲学": ["政治哲学", "伦理学", "形而上学", "认识论", "美学"],
+    "历史学": ["政治史", "经济史", "思想史", "世界史", "中国史"],
+    "社会学": ["政治社会学", "经济社会学", "文化社会学", "组织社会学"],
+    # 其他学科可按需扩展
+}
+
+
 class BookMetadata(BaseModel):
     """书籍元数据"""
     title: str = Field(..., description="书名")
@@ -32,7 +42,8 @@ class BookMetadata(BaseModel):
     author_intro: str = Field(..., description="作者简介")
     year_published: Optional[str] = Field(None, description="出版年份")
     category: List[str] = Field(default_factory=list, description="分类标签")
-    discipline: DisciplineType = Field(..., description="所属学科")
+    discipline: DisciplineType = Field(..., description="所属一级学科")
+    sub_discipline: Optional[str] = Field(None, description="所属二级子学科（如：政治哲学属于政治学）")
     tags: List[str] = Field(default_factory=list, description="标签列表")
     related_books: List[str] = Field(default_factory=list, description="关联书籍")
 
@@ -49,7 +60,7 @@ class ChapterSummary(BaseModel):
     chapter_number: str = Field(..., description="章节编号")
     title: str = Field(..., description="章节标题")
     core_argument: str = Field(..., description="核心论点")
-    underlying_logic: str = Field(..., description="底层逻辑 - 前提假设→推理链条→核心结论")
+    underlying_logic: str = Field(..., description="底层逻辑 - 三行格式：前提假设\\n推理链条\\n核心结论")
     related_books: List[str] = Field(default_factory=list, description="关联书籍")
     critical_questions: List[str] = Field(default_factory=list, description="批判性问题列表")
 
@@ -141,7 +152,8 @@ class BookGraph(BaseModel):
                     "author_intro": "意大利文艺复兴时期政治思想家",
                     "year_published": "1532",
                     "category": ["政治哲学", "经典著作"],
-                    "discipline": "政治哲学",
+                    "discipline": "政治学",
+                    "sub_discipline": "政治哲学",
                     "tags": ["权力", "统治", "政治现实主义"],
                     "related_books": ["理想国", "利维坦"]
                 }

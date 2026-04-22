@@ -201,7 +201,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output", "-o",
         type=str,
-        default="/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治哲学/书籍图谱/",
+        default="/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治学/书籍图谱/",
         help="输出目录"
     )
     

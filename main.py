@@ -75,67 +75,38 @@ def load_config(config_path: str = "config.yaml") -> Dict:
 # ═══════════════════════════════════════════════════════════
 # LLM 调用（通过 Hermes 工具或直接调用 DashScope API）
 # ═══════════════════════════════════════════════════════════
-def call_llm_hermes(system_prompt: str, user_prompt: str, max_tokens: int = 16384) -> str:
+def call_llm_via_tool(system_prompt: str, user_prompt: str, max_tokens: int = 16384) -> str:
     """
-    通过 DashScope API 调用 LLM
-    
+    输出 LLM 调用提示词，等待 Hermes/Claude Code 工具调用
+
+    设计意图：BookGraph Agent 通过 Hermes/Claude Code 工具调用（使用当前对话的 LLM），
+    而不是自己调用外部 API。
+
     Args:
         system_prompt: 系统提示词
         user_prompt: 用户输入
         max_tokens: 最大输出 token 数
-        
+
     Returns:
-        str: LLM 响应文本
+        str: LLM 响应文本（由 Hermes Agent 提供）
     """
-    import requests
-    import os
-    from dotenv import load_dotenv
-    
-    load_dotenv()
-    
-    api_key = os.environ.get('DASHSCOPE_API_KEY')
-    base_url = os.environ.get('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
-    model = os.environ.get('DASHSCOPE_MODEL', 'qwen3.5-plus')
-    
-    if not api_key:
-        logger.warning("⚠️  DASHSCOPE_API_KEY 未配置，返回空响应")
-        return None
-    
-    headers = {
-        'Authorization': f'Bearer {api_key}',
-        'Content-Type': 'application/json'
-    }
-    
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt}
-        ],
-        "max_tokens": max_tokens,
-        "temperature": 0.3,
-        "stream": False
-    }
-    
-    try:
-        response = requests.post(
-            f"{base_url}/chat/completions",
-            headers=headers,
-            json=payload,
-            timeout=300
-        )
-        
-        if response.status_code == 200:
-            result = response.json()
-            content = result.get('choices', [{}])[0].get('message', {}).get('content', '')
-            return content
-        else:
-            logger.error(f"LLM 调用失败：{response.status_code} - {response.text[:200]}")
-            return None
-            
-    except Exception as e:
-        logger.error(f"LLM 调用错误：{type(e).__name__}: {e}")
-        return None
+    # 输出提示词供 Hermes 调用
+    print("\n" + "="*70)
+    print("📝 [LLM 工具调用请求 - 请 Hermes Agent 处理]")
+    print("="*70)
+    print(f"System Prompt:\n{system_prompt[:1000]}...")
+    print("-"*70)
+    print(f"User Prompt:\n{user_prompt[:2000]}...")
+    print("-"*70)
+    print(f"Max Tokens: {max_tokens}")
+    print("="*70)
+    print("⚠️  此提示词需要 Hermes/Claude Code 工具调用处理")
+    print("    请在 Claude Code 对话中使用当前 LLM 回答此问题")
+    print("="*70 + "\n")
+
+    # 返回 None 表示需要工具调用
+    # 实际使用时，main.py 会检查返回值，如果为 None 则等待外部响应
+    return None
 
 
 # ═══════════════════════════════════════════════════════════
@@ -239,11 +210,11 @@ def process_single_book(
             print(f"System: 你是一位学科分类专家。请准确判断书籍所属学科。")
             print(f"User: {discipline_prompt[:500]}...")
             print("="*70)
-            print("⚠️  当前使用指定学科：政治哲学（需要 Hermes/Claude Code 调用时修改）")
+            print("⚠️  当前使用指定学科：政治学（需要 Hermes/Claude Code 调用时修改）")
             print("="*70 + "\n")
-            
+
             # 临时使用指定学科
-            discipline = "政治哲学"
+            discipline = "政治学"
             logger.info(f"🏷️ 学科：{discipline}")
         
         # ═══════════════════════════════════════════════════
@@ -274,8 +245,8 @@ def process_single_book(
             )
             
             # 调用 LLM（通过 Hermes/Claude Code）
-            analysis = call_llm_hermes(SYSTEM_PROMPT, prompt)
-            
+            analysis = call_llm_via_tool(SYSTEM_PROMPT, prompt)
+
             if analysis:
                 try:
                     # 尝试提取 JSON
@@ -288,11 +259,13 @@ def process_single_book(
                     all_analyses.append(json.loads(json_str))
                     logger.info(f"✅ 完成整书分析")
                 except json.JSONDecodeError as e:
-                    logger.warning(f"⚠️  JSON 解析失败：{e}，使用空分析")
-                    all_analyses.append({})
+                    logger.error(f"❌ JSON 解析失败：{e}")
+                    raise Exception(f"LLM 响应解析失败，请检查响应格式")
             else:
-                logger.warning("⚠️  LLM 调用未获取响应，使用空分析")
-                all_analyses.append({})
+                # 当工具调用返回 None 时，需要等待 Hermes/Claude Code 处理
+                logger.error("❌ 需要 Hermes/Claude Code 工具调用处理上述提示词")
+                logger.error("   当前模式不支持自动调用外部 API")
+                raise Exception("需要 LLM 工具调用响应，请使用 Hermes/Claude Code 模式")
                 
         else:
             # 长内容：分块处理
@@ -312,8 +285,8 @@ def process_single_book(
                 )
                 
                 # 调用 LLM（通过 Hermes/Claude Code）
-                analysis = call_llm_hermes(SYSTEM_PROMPT, prompt)
-                
+                analysis = call_llm_via_tool(SYSTEM_PROMPT, prompt)
+
                 if analysis:
                     try:
                         # 尝试提取 JSON
@@ -325,11 +298,11 @@ def process_single_book(
                             json_str = analysis
                         all_analyses.append(json.loads(json_str))
                     except json.JSONDecodeError as e:
-                        logger.warning(f"⚠️  块 {i+1} JSON 解析失败：{e}，使用空分析")
-                        all_analyses.append({})
+                        logger.error(f"❌ 块 {i+1} JSON 解析失败：{e}")
+                        raise Exception(f"LLM 响应解析失败")
                 else:
-                    logger.warning(f"⚠️  块 {i+1} LLM 调用未获取响应")
-                    all_analyses.append({})
+                    logger.error(f"❌ 需要 Hermes/Claude Code 工具调用处理块 {i+1}")
+                    raise Exception("需要 LLM 工具调用响应")
             
             logger.info(f"✅ 完成 {num_chunks} 个分块分析")
         
@@ -358,7 +331,18 @@ def process_single_book(
         logger.info(f"📡 调用 LLM 生成知识图谱...")
         
         # 调用 LLM 生成完整的知识图谱
-        llm_response = call_llm_hermes(SYSTEM_PROMPT, synthesis_prompt, max_tokens=16384)
+        llm_response = call_llm_via_tool(SYSTEM_PROMPT, synthesis_prompt, max_tokens=16384)
+
+        # ═══════════════════════════════════════════════════════════
+        # 重要：当 LLM 工具调用返回 None 时，表示需要 Hermes/Claude Code 处理
+        # 此时不应继续使用模板默认值，而是等待工具调用响应
+        # ═══════════════════════════════════════════════════════════
+        if not llm_response:
+            logger.error("❌ LLM 工具调用未获取响应")
+            logger.error("   请在 Hermes/Claude Code 对话中处理上述提示词")
+            logger.error("   或使用正确配置的 API Key 后重新运行")
+            result["error"] = "需要 LLM 工具调用响应"
+            return result
         
         book_graph_data = {}
         
@@ -448,6 +432,18 @@ def process_single_book(
                         related_books=ch.get('related_books', []),
                         critical_questions=ch.get('critical_questions', [])
                     ))
+        elif not chapters_data and parse_result.chapters:
+            # Fallback: 从解析结果提取章节信息
+            logger.info(f"📋 使用解析结果的 {len(parse_result.chapters)} 个章节作为 fallback")
+            for idx, ch in enumerate(parse_result.chapters, 1):
+                book_graph.chapters.append(ChapterSummary(
+                    chapter_number=str(idx),
+                    title=ch.get('title', f'第{idx}章'),
+                    core_argument='本章探讨了书中的核心议题。',
+                    underlying_logic='作者通过逻辑推理展开论述。',
+                    related_books=[],
+                    critical_questions=[]
+                ))
         
         # 解析核心概念
         concepts_data = book_graph_data.get('core_concepts', [])
@@ -570,10 +566,10 @@ def process_single_book(
 # 批量处理
 # ═══════════════════════════════════════════════════════════
 def process_batch(
-    directory: Path, 
+    directory: Path,
     config: Dict,
     discipline_override: str = None,
-    max_workers: int = 3
+    max_workers: int = 1
 ) -> List[Dict]:
     """
     批量处理目录中的所有支持格式书籍
@@ -731,8 +727,8 @@ def main():
     parser.add_argument(
         "--workers", "-w",
         type=int,
-        default=3,
-        help="批量处理时的最大并发数（默认：3）"
+        default=1,
+        help="批量处理时的最大并发数（默认：1）"
     )
     
     args = parser.parse_args()

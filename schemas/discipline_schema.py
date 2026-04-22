@@ -37,7 +37,7 @@ class CoreIdea(BaseModel):
     """核心思想"""
     name: str = Field(..., description="思想名称")
     definition: str = Field(..., description="定义")
-    underlying_logic: str = Field(..., description="底层逻辑 - 前提假设→推理链条→核心结论")
+    underlying_logic: str = Field(..., description="底层逻辑 - 三行格式：前提假设\\n推理链条\\n核心结论")
     key_proponents: List[str] = Field(default_factory=list, description="主要代表人物")
     related_concepts: List[str] = Field(default_factory=list, description="关联概念")
 

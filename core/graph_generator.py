@@ -4,6 +4,7 @@ Graph Generator - 知识图谱 Markdown 生成器
 生成符合 Obsidian 标准的 Markdown 文件，包含完整的 Callout 语法和结构化内容。
 """
 
+import re
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 from pathlib import Path
@@ -160,17 +161,11 @@ class GraphGenerator:
             # 核心论点和底层逻辑保持完整，不截断，替换特殊字符避免破坏表格
             core_arg = chapter.core_argument.replace("|", "｜").replace("\n", " ").strip()
             logic = chapter.underlying_logic.replace("|", "｜").replace("\n", " ").strip()
-            
-            # 如果底层逻辑太长，换行显示而不是截断
-            if len(logic) > 200:
-                logic_display = logic[:200] + "..."
-            else:
-                logic_display = logic
-            
+
             lines.append(
                 f"| {chapter.chapter_number} | {chapter.title} | "
                 f"{core_arg} | "
-                f"{logic_display} | {related} |"
+                f"{logic} | {related} |"
             )
         lines.append("")
         
@@ -195,9 +190,21 @@ class GraphGenerator:
             
             if concept.underlying_logic:
                 lines.append("**底层逻辑**：")
-                lines.append("```")
-                lines.append(concept.underlying_logic)
-                lines.append("```")
+                lines.append("")
+                # 拆分为前提假设、推理链条、核心结论三行
+                logic_text = concept.underlying_logic
+                # 解析单行格式：前提假设：xxx→推理链条：xxx→核心结论：xxx
+                m = re.match(r'前提假设：(.+?)→推理链条：(.+?)→核心结论：(.+)$', logic_text)
+                if m:
+                    lines.append(f"- **前提假设**：{m.group(1).strip()}")
+                    lines.append(f"- **推理链条**：{m.group(2).strip()}")
+                    lines.append(f"- **核心结论**：{m.group(3).strip()}")
+                else:
+                    # 已经是多行格式或其他格式，直接输出
+                    for line_text in logic_text.split('\n'):
+                        stripped = line_text.strip()
+                        if stripped:
+                            lines.append(f"- {stripped}")
                 lines.append("")
             
             if concept.development_stages:
@@ -245,9 +252,19 @@ class GraphGenerator:
             
             if insight.underlying_logic:
                 lines.append("**底层逻辑**：")
-                lines.append("```")
-                lines.append(insight.underlying_logic)
-                lines.append("```")
+                lines.append("")
+                # 拆分为前提假设、推理链条、核心结论三行
+                logic_text = insight.underlying_logic
+                m = re.match(r'前提假设：(.+?)→推理链条：(.+?)→核心结论：(.+)$', logic_text)
+                if m:
+                    lines.append(f"- **前提假设**：{m.group(1).strip()}")
+                    lines.append(f"- **推理链条**：{m.group(2).strip()}")
+                    lines.append(f"- **核心结论**：{m.group(3).strip()}")
+                else:
+                    for line_text in logic_text.split('\n'):
+                        stripped = line_text.strip()
+                        if stripped:
+                            lines.append(f"- {stripped}")
                 lines.append("")
             
             if insight.deep_assumptions:
@@ -581,9 +598,19 @@ class GraphGenerator:
                 lines.append(f"**定义**：{idea.definition}")
                 lines.append("")
                 lines.append("**底层逻辑**：")
-                lines.append("```")
-                lines.append(idea.underlying_logic)
-                lines.append("```")
+                lines.append("")
+                # 拆分为前提假设、推理链条、核心结论三行
+                logic_text = idea.underlying_logic
+                m = re.match(r'前提假设：(.+?)→推理链条：(.+?)→核心结论：(.+)$', logic_text)
+                if m:
+                    lines.append(f"- **前提假设**：{m.group(1).strip()}")
+                    lines.append(f"- **推理链条**：{m.group(2).strip()}")
+                    lines.append(f"- **核心结论**：{m.group(3).strip()}")
+                else:
+                    for line_text in logic_text.split('\n'):
+                        stripped = line_text.strip()
+                        if stripped:
+                            lines.append(f"- {stripped}")
                 lines.append("")
                 
                 if idea.key_proponents:

@@ -22,7 +22,7 @@ from utils.logger import setup_logger
 logger = setup_logger("BookGraph-Hermes")
 
 
-def analyze_book_with_hermes(book_path: str, output_dir: str = None, discipline: str = "政治哲学"):
+def analyze_book_with_hermes(book_path: str, output_dir: str = None, discipline: str = "政治学", sub_discipline: str = None):
     """
     使用 Hermes 内置 LLM 分析书籍
     
@@ -148,8 +148,9 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="BookGraph Agent - Hermes 工具调用")
     parser.add_argument("--input", "-i", type=str, required=True, help="书籍文件路径")
-    parser.add_argument("--output", "-o", type=str, default="/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治哲学/书籍图谱/", help="输出目录")
-    parser.add_argument("--discipline", "-d", type=str, default="政治哲学", help="学科分类")
+    parser.add_argument("--output", "-o", type=str, default="/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治学/书籍图谱/", help="输出目录")
+    parser.add_argument("--discipline", "-d", type=str, default="政治学", help="一级学科分类")
+    parser.add_argument("--sub-discipline", "-s", type=str, default=None, help="二级子学科（如：政治哲学）")
     
     args = parser.parse_args()
     

@@ -614,7 +614,8 @@ def create_complete_book_graph():
             author_intro="意大利文艺复兴时期政治思想家、外交家、历史学家。曾任佛罗伦萨共和国第二国务厅长官，负责外交与军事事务。1512年美第奇家族复辟后被免职，1513年因谋反嫌疑入狱受刑，出狱后隐居乡间撰写《君主论》与《论李维》。代表作《君主论》《论李维》《佛罗伦萨史》。被誉为现代政治哲学奠基人，现实主义政治理论开创者。",
             year_published="1532",
             category=["政治哲学", "经典著作", "现实主义"],
-            discipline=DisciplineType.政治哲学,
+            discipline=DisciplineType.政治学,
+            sub_discipline="政治哲学",
             tags=["权力", "统治", "政治现实主义", "君主制", "德能", "机运", "军事"],
             related_books=["理想国", "利维坦", "社会契约论", "论李维", "战争论"]
         ),
@@ -658,8 +659,8 @@ def main():
     print(f"✅ Markdown 生成完成")
     print(f"   内容长度: {len(markdown_content)} 字符")
 
-    # 保存到目标文件
-    output_path = "/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治哲学/书籍图谱/君主论.md"
+    # 保存到目标文件（政治哲学书籍归入政治学学科目录）
+    output_path = "/Users/rayzhang/Documents/知识体系/📚 知识图谱/政治学/书籍图谱/君主论.md"
 
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(markdown_content)

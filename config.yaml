@@ -6,9 +6,8 @@ obsidian:
   vault_path: "/Users/rayzhang/Documents/知识体系"
   graph_root: "📚 知识图谱"
   
-  # 学科路径映射
+  # 一级学科路径映射
   discipline_paths:
-    政治哲学: "📚 知识图谱/政治哲学"
     政治学: "📚 知识图谱/政治学"
     经济学: "📚 知识图谱/经济学"
     心理学: "📚 知识图谱/心理学"
@@ -19,6 +18,10 @@ obsidian:
     文学: "📚 知识图谱/文学"
     科学: "📚 知识图谱/科学"
     技术: "📚 知识图谱/技术"
+
+  # 二级子学科配置（可选，用于更细分分类）
+  # 书籍默认存放在一级学科目录，如需单独建立子学科目录可在此配置
+  sub_discipline_paths: {}
 
   # 子目录结构
   subdirectories:
@@ -33,11 +36,12 @@ llm:
   max_tokens: 16384
   temperature: 0.3
   chunk_size: 30000        # 每块字符数
-  max_retries: 3
-  retry_delay: 5
+  max_retries: 5
+  retry_delay: 10
+  timeout: 600             # 增加到 600 秒
 
 batch:
-  max_workers: 3           # 并发数
+  max_workers: 1           # 并发数（设置为 1，串行处理）
 
 logging:
   level: "INFO"

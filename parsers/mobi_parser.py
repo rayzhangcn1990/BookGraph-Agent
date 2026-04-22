@@ -53,13 +53,23 @@ class MobiParser(BaseParser):
             self.temp_dir = tempfile.mkdtemp(prefix="mobi_extract_")
             
             # 提取 MOBI 文件
-            extract_path, container = mobi.extract(self.file_path)
+            # mobi.extract 需要字符串路径，返回 (extract_path, html_file_path)
+            file_path_str = str(self.file_path)
+            result = mobi.extract(file_path_str)
+            if isinstance(result, tuple):
+                extract_path, html_file_path = result
+            else:
+                extract_path = result
+                html_file_path = None
             
-            # 获取元数据
-            metadata = self._extract_metadata(container)
+            # 获取元数据（从文件名提取，mobi 库不提供元数据对象）
+            metadata = self._extract_metadata(None)
             
             # 提取 HTML 内容
-            html_content = self._extract_html_content(extract_path)
+            if html_file_path:
+                html_content = self._read_html_file(html_file_path)
+            else:
+                html_content = self._extract_html_content(str(extract_path))
             
             if not html_content:
                 return ParseResult(
@@ -97,6 +107,9 @@ class MobiParser(BaseParser):
             )
             
         except Exception as e:
+            import traceback
+            error_detail = traceback.format_exc()
+            print(f"DEBUG: {error_detail}")  # 调试输出
             self._cleanup()
             return ParseResult(
                 success=False,
@@ -109,7 +122,7 @@ class MobiParser(BaseParser):
         从 MOBI 容器提取元数据
         
         Args:
-            container: mobi 容器对象
+            container: mobi 容器对象或路径字符串
             
         Returns:
             Dict: 包含 title, author 等信息
@@ -122,6 +135,13 @@ class MobiParser(BaseParser):
             "date": "",
             "identifier": "",
         }
+        
+        # 如果 container 是字符串（路径），直接返回空元数据
+        if isinstance(container, str):
+            path_metadata = self.extract_metadata_from_path()
+            metadata["title"] = path_metadata.get("title", self.file_path.stem)
+            metadata["author"] = path_metadata.get("author", "Unknown")
+            return metadata
         
         try:
             # 尝试从 container 提取元数据
@@ -202,6 +222,26 @@ class MobiParser(BaseParser):
             
         except Exception:
             return None
+    
+    def _read_html_file(self, html_file_path: str) -> Optional[str]:
+        """
+        直接读取 HTML 文件
+        
+        Args:
+            html_file_path: HTML 文件路径
+            
+        Returns:
+            Optional[str]: HTML 内容或 None
+        """
+        try:
+            with open(html_file_path, 'r', encoding='utf-8') as f:
+                return f.read()
+        except UnicodeDecodeError:
+            try:
+                with open(html_file_path, 'r', encoding='gbk') as f:
+                    return f.read()
+            except Exception:
+                return None
 
     def _process_html(self, html_content: str) -> List[Dict]:
         """
