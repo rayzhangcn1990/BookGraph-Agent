@@ -35,9 +35,11 @@ from core.graph_generator import GraphGenerator
 from core.obsidian_writer import ObsidianWriter
 from core.discipline_manager import DisciplineManager
 from core.ocr_engine import OcrEngine
-from core.llm_client import SYSTEM_PROMPT, CHUNK_ANALYSIS_PROMPT, SYNTHESIS_PROMPT, DISCIPLINE_DETECTION_PROMPT
+from core.llm_client import SYSTEM_PROMPT, CHUNK_ANALYSIS_PROMPT, BATCH_CHUNK_ANALYSIS_PROMPT, SYNTHESIS_PROMPT, DISCIPLINE_DETECTION_PROMPT, LLMClient
+from core.wikipedia_enricher import WikipediaEnricher
+from core.incremental_evolver import IncrementalEvolver
+from core.engine_selector import auto_select_engine
 from utils.logger import setup_logger
-from utils.path_manager import PathManager
 from utils.cache import Cache
 from utils.progress import ProgressTracker
 
@@ -46,6 +48,19 @@ from utils.progress import ProgressTracker
 # 日志配置
 # ═══════════════════════════════════════════════════════════
 logger = setup_logger("BookGraph-Agent")
+
+# ═══════════════════════════════════════════════════════════
+# 全局 LLM 客户端
+# ═══════════════════════════════════════════════════════════
+llm_client = None
+
+def get_llm_client(config: Dict = None):
+    """获取 LLM 客户端实例"""
+    global llm_client
+    if llm_client is None:
+        llm_config = config.get('llm', {}) if config else {}
+        llm_client = LLMClient(llm_config)
+    return llm_client
 
 
 # ═══════════════════════════════════════════════════════════
@@ -75,37 +90,77 @@ def load_config(config_path: str = "config.yaml") -> Dict:
 # ═══════════════════════════════════════════════════════════
 # LLM 调用（通过 Hermes 工具或直接调用 DashScope API）
 # ═══════════════════════════════════════════════════════════
-def call_llm_via_tool(system_prompt: str, user_prompt: str, max_tokens: int = 16384) -> str:
+def call_llm_via_tool(system_prompt: str, user_prompt: str, max_tokens: int = 16384, max_retries: int = 5) -> str:
     """
-    输出 LLM 调用提示词，等待 Hermes/Claude Code 工具调用
+    调用 LLM 获取响应（带智能重试）
 
-    设计意图：BookGraph Agent 通过 Hermes/Claude Code 工具调用（使用当前对话的 LLM），
-    而不是自己调用外部 API。
+    使用配置的 LLM 客户端（Anthropic、DashScope 或 OpenAI）来处理请求。
 
     Args:
         system_prompt: 系统提示词
         user_prompt: 用户输入
         max_tokens: 最大输出 token 数
+        max_retries: 最大重试次数（遇到限流时）
 
     Returns:
-        str: LLM 响应文本（由 Hermes Agent 提供）
+        str: LLM 响应文本
     """
-    # 输出提示词供 Hermes 调用
-    print("\n" + "="*70)
-    print("📝 [LLM 工具调用请求 - 请 Hermes Agent 处理]")
-    print("="*70)
-    print(f"System Prompt:\n{system_prompt[:1000]}...")
-    print("-"*70)
-    print(f"User Prompt:\n{user_prompt[:2000]}...")
-    print("-"*70)
-    print(f"Max Tokens: {max_tokens}")
-    print("="*70)
-    print("⚠️  此提示词需要 Hermes/Claude Code 工具调用处理")
-    print("    请在 Claude Code 对话中使用当前 LLM 回答此问题")
-    print("="*70 + "\n")
+    import random
 
-    # 返回 None 表示需要工具调用
-    # 实际使用时，main.py 会检查返回值，如果为 None 则等待外部响应
+    for attempt in range(max_retries):
+        try:
+            # 获取配置（从环境变量或默认值）
+            config = load_config()
+            client = get_llm_client(config)
+
+            # 构建消息格式
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ]
+
+            # 调用 LLM
+            logger.info("📡 正在调用 LLM...")
+            response = client._call_llm(messages, max_tokens=max_tokens)
+
+            if response:
+                logger.info(f"✅ LLM 响应成功（{len(response)} 字符）")
+                return response
+            else:
+                logger.error("❌ LLM 调用失败，未获取响应")
+                return None
+
+        except Exception as e:
+            error_str = str(e)
+
+            # 处理 429 限流错误
+            if '429' in error_str or 'throttling' in error_str.lower():
+                if attempt < max_retries - 1:
+                    wait_time = random.randint(180, 300)  # 等待 3-5 分钟
+                    logger.warning(f"⚠️ API 限流 (尝试 {attempt+1}/{max_retries})")
+                    logger.info(f"   💤 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"❌ 重试 {max_retries} 次后仍然限流")
+                    return None
+
+            # 处理超时错误 - 华为蓝军自攻击：30分钟超时需重试
+            elif 'timeout' in error_str.lower() or 'timed out' in error_str.lower():
+                if attempt < max_retries - 1:
+                    wait_time = random.randint(60, 120)  # 等待 1-2 分钟
+                    logger.warning(f"⚠️ API 超时 (尝试 {attempt+1}/{max_retries})")
+                    logger.info(f"   💤 等待 {wait_time} 秒后重试...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    logger.error(f"❌ 重试 {max_retries} 次后仍然超时")
+                    return None
+
+            else:
+                logger.error(f"❌ LLM 调用异常: {e}")
+                return None
+
     return None
 
 
@@ -144,21 +199,36 @@ def process_single_book(
     }
     
     try:
+        # 确保 book_path 是 Path 对象
+        book_path = Path(book_path) if isinstance(book_path, str) else book_path
+
         # ═══════════════════════════════════════════════════
         # Step 1: 初始化所有模块
         # ═══════════════════════════════════════════════════
         logger.info(f"📖 开始处理：{book_path.name}")
-        
+
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
         graph_generator = GraphGenerator(config)
         ocr_engine = OcrEngine(config.get('ocr', {}))
-        
+
         discipline_manager = DisciplineManager(
             obsidian_writer=obsidian_writer,
             graph_generator=graph_generator,
             config=config,
         )
-        
+
+        # 初始化增量演化器（从知识基底复用已有概念）
+        vault_path = config.get('obsidian', {}).get('vault_path', '')
+        if vault_path:
+            # 🔑 使用 ObsidianWriter 的路径计算逻辑，避免丢失中间层级
+            discipline_path = obsidian_writer._get_discipline_path(discipline_override) if discipline_override else Path(config.get('obsidian', {}).get('graph_root', '📚 知识图谱'))
+            kb_path = Path(vault_path) / discipline_path
+            evolver = IncrementalEvolver(kb_path)
+            logger.info(f"🔄 增量演化器已初始化，知识基底: {evolver.get_statistics()}")
+        else:
+            evolver = None
+            logger.warning("未配置 Obsidian vault_path，增量演化功能禁用")
+
         # ═══════════════════════════════════════════════════
         # Step 2: 解析书籍
         # ═══════════════════════════════════════════════════
@@ -216,16 +286,57 @@ def process_single_book(
             # 临时使用指定学科
             discipline = "政治学"
             logger.info(f"🏷️ 学科：{discipline}")
-        
+
+        # ═══════════════════════════════════════════════════
+        # Step 3.5: 增量抽取规划（复用已有知识）
+        # ═══════════════════════════════════════════════════
+        extraction_plan = None
+        reusable_knowledge = {}
+
+        if evolver:
+            author = parse_result.metadata.get('author', 'Unknown')
+            book_title = parse_result.metadata.get('title', book_path.stem)
+            logger.info(f"🎯 增量抽取规划: {book_title} by {author}")
+
+            extraction_plan = evolver.plan_extraction(book_title, author)
+
+            if extraction_plan.reuse_concepts:
+                reusable_knowledge = evolver.get_reusable_knowledge(extraction_plan.reuse_concepts)
+                logger.info(f"✅ 可复用概念: {len(extraction_plan.reuse_concepts)}个，"
+                           f"预估节省 {extraction_plan.estimated_tokens_saved} tokens")
+
         # ═══════════════════════════════════════════════════
         # Step 4: 确保目录结构存在
         # ═══════════════════════════════════════════════════
         obsidian_writer.ensure_discipline_structure(discipline)
-        
+
+        # ═══════════════════════════════════════════════════════════════════════
+        # Step 4.5: 自动选择最优引擎
+        # ═══════════════════════════════════════════════════════════════════════
+
+        # 合并所有章节内容为完整文本（用于引擎选择）
+        estimated_length = len("\n\n".join([ch["content"] for ch in parse_result.chapters]))
+
+        # 获取知识基底统计
+        kb_stats = evolver.get_statistics() if evolver else {'total_concepts': 0}
+
+        # 自动选择引擎
+        engine_rec = auto_select_engine(
+            content_length=estimated_length,
+            discipline=discipline,
+            kb_concepts_count=kb_stats['total_concepts'],
+            extraction_type="graph",
+            has_complex_relations=True  # 政治学书籍通常有复杂关系
+        )
+
+        logger.info(f"🧠 引擎选择: {engine_rec.primary_engine.value}")
+        logger.info(f"   原因: {engine_rec.reason}")
+        logger.info(f"   速度: {engine_rec.estimated_speed} | 质量: {engine_rec.estimated_quality}")
+
         # ═══════════════════════════════════════════════════
         # Step 5: 分块分析（通过 Hermes/Claude Code）
         # ═══════════════════════════════════════════════════
-        
+
         # 合并所有章节内容为完整文本
         full_content = "\n\n".join([ch["content"] for ch in parse_result.chapters])
         content_length = len(full_content)
@@ -241,7 +352,7 @@ def process_single_book(
             
             prompt = CHUNK_ANALYSIS_PROMPT.format(
                 book_title=parse_result.metadata.get('title', book_path.stem),
-                chunk_content=full_content[:25000],
+                chunk_content=full_content,  # 🔑 移除截断，发送完整内容
             )
             
             # 调用 LLM（通过 Hermes/Claude Code）
@@ -268,26 +379,169 @@ def process_single_book(
                 raise Exception("需要 LLM 工具调用响应，请使用 Hermes/Claude Code 模式")
                 
         else:
-            # 长内容：分块处理
-            num_chunks = (content_length + max_chunk_size - 1) // max_chunk_size
-            logger.info(f"🧩 分块分析中（{content_length}字符，{num_chunks}块）...")
-            
-            for i in range(num_chunks):
-                start = i * max_chunk_size
-                end = min((i + 1) * max_chunk_size, content_length)
-                chunk_content = full_content[start:end]
-                
-                logger.info(f"   分析块 {i+1}/{num_chunks}...")
-                
-                prompt = CHUNK_ANALYSIS_PROMPT.format(
-                    book_title=parse_result.metadata.get('title', book_path.stem),
-                    chunk_content=chunk_content[:25000],
+            # 长内容：语义分块处理（优先使用章节边界，保持内容完整性）
+            # 🔑 优化：语义分块 - 先按章节，再按段落，避免跨章节分割
+
+            # 合并所有章节内容为完整文本
+            full_content = "\n\n".join([ch["content"] for ch in parse_result.chapters])
+            content_length = len(full_content)
+            max_chunk_size = config.get('llm', {}).get('chunk_size', 25000)
+            merge_threshold = config.get('llm', {}).get('merge_threshold', 15000)
+
+            # 🔑 新增：语义分块（优先使用章节边界）
+            chunks = []
+
+            if parse_result.chapters and len(parse_result.chapters) > 1:
+                # 有章节结构：按章节分块
+                logger.info(f"🧩 语义分块中（{content_length}字符，{len(parse_result.chapters)}章节）...")
+
+                for i, chapter in enumerate(parse_result.chapters):
+                    chapter_content = chapter.get("content", "")
+                    chapter_title = chapter.get("title", f"第{i+1}章")
+
+                    if len(chapter_content) <= max_chunk_size:
+                        # 章节完整，不拆分
+                        chunks.append((i, chapter_content, f"[{chapter_title}]"))
+                    else:
+                        # 大章节：按段落边界拆分（保持语义完整性）
+                        paragraphs = chapter_content.split("\n\n")
+                        sub_chunks = []
+                        current_chunk = ""
+
+                        for para in paragraphs:
+                            if len(current_chunk) + len(para) <= max_chunk_size:
+                                current_chunk += para + "\n\n"
+                            else:
+                                if current_chunk:
+                                    sub_chunks.append(current_chunk)
+                                current_chunk = para + "\n\n"
+
+                        if current_chunk:
+                            sub_chunks.append(current_chunk)
+
+                        # 添加子块
+                        for j, sub_content in enumerate(sub_chunks):
+                            chunks.append((len(chunks), sub_content, f"[{chapter_title} - 部分{j+1}]"))
+
+                logger.info(f"   ✅ 语义分块：{len(chunks)} 块（基于 {len(parse_result.chapters)} 章节结构）")
+            else:
+                # 无章节结构：按字符数分块（原有逻辑）
+                num_chunks = (content_length + max_chunk_size - 1) // max_chunk_size
+                logger.info(f"🧩 字符分块中（{content_length}字符，预估{num_chunks}块）...")
+
+                for i in range(num_chunks):
+                    start = i * max_chunk_size
+                    end = min((i + 1) * max_chunk_size, content_length)
+                    chunks.append((i, full_content[start:end], ""))
+
+            # 智能合并：小于 threshold 的 chunk 合并到相邻块
+            final_chunks = []
+            merged_count = 0
+            for i, content, label in chunks:
+                if len(content) < merge_threshold and final_chunks:
+                    # 合并到前一个 chunk（保持语义连续）
+                    prev_content, prev_label = final_chunks[-1][1], final_chunks[-1][2]
+                    final_chunks[-1] = (final_chunks[-1][0], prev_content + "\n\n" + content, prev_label + " + " + label)
+                    merged_count += 1
+                else:
+                    final_chunks.append((i, content, label))
+
+            chunks = final_chunks
+            logger.info(f"   🔧 智能合并：{merged_count} 个小块合并，最终 {len(chunks)} 块")
+
+            num_chunks = len(chunks)
+
+            # 🔑 优化：批量请求合并配置
+            BATCH_SIZE = 1  # 🔑 不合并，每块单独处理，避免内容过大超时
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            def process_chunk_batch(batch_chunks, book_title, batch_index):
+                """批量处理多个 chunk（减少 API 调用次数）"""
+                batch_size = len(batch_chunks)
+
+                # 合并内容（用分隔符标记边界）
+                merged_content = ""
+                total_content_length = 0
+                MAX_BATCH_CONTENT = 80000  # 🔑 降低到80KB，确保大batch被分割避免API超时
+
+                for i, (idx, content, label) in enumerate(batch_chunks):
+                    chunk_content = content  # 🔑 不截断单个chunk，保持完整性
+                    merged_content += f"\n\n--- CHUNK BREAK (块 {idx+1} {label}) ---\n\n{chunk_content}"
+                    total_content_length += len(chunk_content)
+
+                # 🔑 修复：如果合并内容超过限制，回退到小块处理（按25000字符分割）
+                if total_content_length > MAX_BATCH_CONTENT:
+                    logger.warning(f"   ⚠️ 批量内容过长({total_content_length}字符)，回退到小块处理")
+                    single_results = []
+                    MAX_SINGLE_CHUNK = 25000  # 单块最大尺寸
+
+                    for idx, content, label in batch_chunks:
+                        if len(content) <= MAX_SINGLE_CHUNK:
+                            # 小块直接处理
+                            single_prompt = CHUNK_ANALYSIS_PROMPT.format(
+                                book_title=book_title,
+                                chunk_content=content,
+                            )
+                            single_analysis = call_llm_via_tool(SYSTEM_PROMPT, single_prompt, max_tokens=16384)
+                            if single_analysis:
+                                try:
+                                    json_start = single_analysis.find('{')
+                                    json_end = single_analysis.rfind('}') + 1
+                                    if json_start >= 0 and json_end > json_start:
+                                        single_result = json.loads(single_analysis[json_start:json_end])
+                                    else:
+                                        single_result = json.loads(single_analysis)
+                                    single_results.append((idx, single_result))
+                                    logger.info(f"   ✅ 单块 {idx+1} 完成")
+                                except:
+                                    single_results.append((idx, None))
+                            else:
+                                single_results.append((idx, None))
+                        else:
+                            # 大块分割成小块处理
+                            sub_chunks = [(i, content[i:i+MAX_SINGLE_CHUNK]) for i in range(0, len(content), MAX_SINGLE_CHUNK)]
+                            logger.info(f"   大块 {idx+1} ({len(content)}字符) 分割为 {len(sub_chunks)} 个小块")
+
+                            for sub_idx, sub_content in sub_chunks:
+                                single_prompt = CHUNK_ANALYSIS_PROMPT.format(
+                                    book_title=book_title,
+                                    chunk_content=sub_content,
+                                )
+                                single_analysis = call_llm_via_tool(SYSTEM_PROMPT, single_prompt, max_tokens=16384)
+                                if single_analysis:
+                                    try:
+                                        json_start = single_analysis.find('{')
+                                        json_end = single_analysis.rfind('}') + 1
+                                        if json_start >= 0 and json_end > json_start:
+                                            single_result = json.loads(single_analysis[json_start:json_end])
+                                        else:
+                                            single_result = json.loads(single_analysis)
+                                        # 用 idx + sub_idx * 0.01 保持顺序
+                                        single_results.append((idx + sub_idx * 0.01, single_result))
+                                        logger.info(f"   ✅ 子块 {sub_idx+1}/{len(sub_chunks)} 完成")
+                                    except:
+                                        single_results.append((idx + sub_idx * 0.01, None))
+                                else:
+                                    single_results.append((idx + sub_idx * 0.01, None))
+
+                    return single_results
+
+                logger.info(f"   批量处理 {batch_index+1}: {batch_size} 个块合并为 1 个请求（{total_content_length}字符）")
+
+                prompt = BATCH_CHUNK_ANALYSIS_PROMPT.format(
+                    book_title=book_title,
+                    batch_content=merged_content  # 🔑 移除截断限制
                 )
-                
-                # 调用 LLM（通过 Hermes/Claude Code）
-                analysis = call_llm_via_tool(SYSTEM_PROMPT, prompt)
+
+                analysis = call_llm_via_tool(SYSTEM_PROMPT, prompt, max_tokens=32768)
 
                 if analysis:
+                    # 🔑 调试：打印 LLM 响应的前 2000 字符（用于排查格式问题）
+                    print(f"\n{'='*60}")
+                    print(f"[DEBUG] LLM 响应前2000字符:")
+                    print(analysis[:2000])
+                    print(f"{'='*60}\n")
+
                     try:
                         # 尝试提取 JSON
                         json_start = analysis.find('{')
@@ -296,21 +550,175 @@ def process_single_book(
                             json_str = analysis[json_start:json_end]
                         else:
                             json_str = analysis
-                        all_analyses.append(json.loads(json_str))
+
+                        chunk_analysis = json.loads(json_str)
+                        logger.info(f"   ✅ 批量 {batch_index+1} 完成（{batch_size} 块）")
+
+                        # 解构批量结果为单 chunk 结果
+                        if 'chunks_analysis' in chunk_analysis:
+                            chunk_results = []
+                            for i, chunk in enumerate(chunk_analysis['chunks_analysis']):
+                                # 🔑 增加容错：chunk 可能是字符串或字典
+                                if isinstance(chunk, dict):
+                                    chunk_results.append((chunk.get('chunk_index', i), chunk))
+                                elif isinstance(chunk, str):
+                                    # 尝试解析字符串为 JSON
+                                    try:
+                                        chunk_dict = json.loads(chunk)
+                                        chunk_results.append((chunk_dict.get('chunk_index', i), chunk_dict))
+                                    except:
+                                        # 无法解析，使用索引作为 fallback
+                                        chunk_results.append((i, {"raw_content": chunk}))
+                                else:
+                                    chunk_results.append((i, chunk if chunk else {}))
+                            return chunk_results
+                        else:
+                            # 如果 LLM 返回格式不规范，尝试单块解析
+                            return [(batch_chunks[0][0], chunk_analysis)]
                     except json.JSONDecodeError as e:
-                        logger.error(f"❌ 块 {i+1} JSON 解析失败：{e}")
-                        raise Exception(f"LLM 响应解析失败")
+                        logger.warning(f"⚠️ 批量 {batch_index+1} JSON解析失败，尝试修复...")
+                        logger.warning(f"   原始响应长度: {len(json_str)} 字符")
+                        logger.warning(f"   JSON 提取范围: {json_start} - {json_end}")
+                        logger.warning(f"   错误详情: {e}")
+                        try:
+                            # 补全括号
+                            open_braces = json_str.count('{')
+                            close_braces = json_str.count('}')
+                            if open_braces > close_braces:
+                                json_str_fixed = json_str + '}' * (open_braces - close_braces)
+                                chunk_analysis = json.loads(json_str_fixed)
+                                logger.info(f"   ✅ 批量 {batch_index+1} 修复成功")
+                                if 'chunks_analysis' in chunk_analysis:
+                                    chunk_results = []
+                                    for i, chunk in enumerate(chunk_analysis['chunks_analysis']):
+                                        # 🔑 增加容错：chunk 可能是字符串或字典
+                                        if isinstance(chunk, dict):
+                                            chunk_results.append((chunk.get('chunk_index', i), chunk))
+                                        elif isinstance(chunk, str):
+                                            try:
+                                                chunk_dict = json.loads(chunk)
+                                                chunk_results.append((chunk_dict.get('chunk_index', i), chunk_dict))
+                                            except:
+                                                chunk_results.append((i, {"raw_content": chunk}))
+                                        else:
+                                            chunk_results.append((i, chunk if chunk else {}))
+                                    return chunk_results
+                                else:
+                                    return [(batch_chunks[0][0], chunk_analysis)]
+                        except:
+                            logger.error(f"❌ 批量 {batch_index+1} JSON 修复失败：{e}")
+                            # 🔑 Fallback：回退到小块分析（按25000字符分割）
+                            logger.warning(f"   ⚠️ 回退到小块分析模式...")
+                            single_results = []
+                            MAX_SINGLE_CHUNK = 25000
+
+                            for idx, content, label in batch_chunks:
+                                if len(content) <= MAX_SINGLE_CHUNK:
+                                    single_prompt = CHUNK_ANALYSIS_PROMPT.format(
+                                        book_title=book_title,
+                                        chunk_content=content,
+                                    )
+                                    single_analysis = call_llm_via_tool(SYSTEM_PROMPT, single_prompt, max_tokens=16384)
+                                    if single_analysis:
+                                        try:
+                                            json_start = single_analysis.find('{')
+                                            json_end = single_analysis.rfind('}') + 1
+                                            if json_start >= 0 and json_end > json_start:
+                                                single_result = json.loads(single_analysis[json_start:json_end])
+                                            else:
+                                                single_result = json.loads(single_analysis)
+                                            single_results.append((idx, single_result))
+                                            logger.info(f"   ✅ 单块 {idx+1} 完成（fallback）")
+                                        except:
+                                            single_results.append((idx, None))
+                                    else:
+                                        single_results.append((idx, None))
+                                else:
+                                    # 大块分割
+                                    sub_chunks = [(i, content[i:i+MAX_SINGLE_CHUNK]) for i in range(0, len(content), MAX_SINGLE_CHUNK)]
+                                    logger.info(f"   大块 {idx+1} 分割为 {len(sub_chunks)} 个小块（fallback）")
+
+                                    for sub_idx, sub_content in sub_chunks:
+                                        single_prompt = CHUNK_ANALYSIS_PROMPT.format(
+                                            book_title=book_title,
+                                            chunk_content=sub_content,
+                                        )
+                                        single_analysis = call_llm_via_tool(SYSTEM_PROMPT, single_prompt, max_tokens=16384)
+                                        if single_analysis:
+                                            try:
+                                                json_start = single_analysis.find('{')
+                                                json_end = single_analysis.rfind('}') + 1
+                                                if json_start >= 0 and json_end > json_start:
+                                                    single_result = json.loads(single_analysis[json_start:json_end])
+                                                else:
+                                                    single_result = json.loads(single_analysis)
+                                                single_results.append((idx + sub_idx * 0.01, single_result))
+                                                logger.info(f"   ✅ 子块 {sub_idx+1}/{len(sub_chunks)} 完成（fallback）")
+                                            except:
+                                                single_results.append((idx + sub_idx * 0.01, None))
+                                        else:
+                                            single_results.append((idx + sub_idx * 0.01, None))
+
+                            return single_results
                 else:
-                    logger.error(f"❌ 需要 Hermes/Claude Code 工具调用处理块 {i+1}")
-                    raise Exception("需要 LLM 工具调用响应")
-            
-            logger.info(f"✅ 完成 {num_chunks} 个分块分析")
+                    logger.error(f"❌ 批量 {batch_index+1} 需要 LLM 工具调用")
+                    return [(idx, None) for idx, _, _ in batch_chunks]
+
+            # 🔑 优化：将 chunk 分组为 batch（每 batch 最多 3 个 chunk）
+            chunk_batches = []
+            for i in range(0, len(chunks), BATCH_SIZE):
+                batch = chunks[i:i+BATCH_SIZE]
+                chunk_batches.append((i // BATCH_SIZE, batch))
+
+            logger.info(f"   📦 批量分组：{len(chunks)} 块 → {len(chunk_batches)} 个请求（预期节省 {len(chunks) - len(chunk_batches)} 次 API 调用）")
+
+            # 并行处理所有 batch（最多 2 个并发，避免 429）
+            batch_results = []
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                futures = [executor.submit(process_chunk_batch, batch, parse_result.metadata.get('title', book_path.stem), batch_idx)
+                           for batch_idx, batch in chunk_batches]
+
+                for future in as_completed(futures):
+                    batch_chunk_results = future.result()
+                    if batch_chunk_results:  # 🔑 修复：检查None避免TypeError
+                        for idx, chunk_res in batch_chunk_results:
+                            if chunk_res:
+                                batch_results.append((idx, chunk_res))
+                    else:
+                        logger.warning(f"   ⚠️ 一个batch返回None，跳过")
+
+            # 按顺序排序结果
+            batch_results.sort(key=lambda x: x[0])
+            all_analyses = [r for idx, r in batch_results]
+
+            # 华为蓝军自攻击：允许部分块失败，只要完成 ≥80% 就继续
+            success_rate = len(all_analyses) / len(chunks)
+            if success_rate < 0.8:
+                logger.error(f"❌ 块解析成功率过低：{success_rate:.1%} ({len(all_analyses)}/{len(chunks)})")
+                raise Exception(f"块解析成功率过低：{success_rate:.1%}")
+            elif len(all_analyses) < len(chunks):
+                logger.warning(f"⚠️ 部分块解析失败，但成功率达标：{success_rate:.1%} ({len(all_analyses)}/{len(chunks)})")
+                logger.warning(f"   知识图谱数据可能不完整，但继续生成")
+
+            logger.info(f"✅ 完成 {len(all_analyses)}/{len(chunks)} 个分块分析（成功率：{success_rate:.1%}）")
+            logger.info(f"   💰 批量合并节省：{len(chunks) - len(chunk_batches)} 次 API 调用")
         
         # ═══════════════════════════════════════════════════
         # Step 6: 综合生成 BookGraph（通过 LLM 调用）
         # ═══════════════════════════════════════════════════
         logger.info("🔮 综合生成知识图谱...")
-        
+
+        # 🔑 根本方案：提取完整章节列表，强制保留
+        chapters_list_str = ""
+        if parse_result.chapters:
+            chapters_list = []
+            for i, ch in enumerate(parse_result.chapters):
+                title = ch.get('title', f'第{i+1}章')
+                chapters_list.append(f"{i+1}. {title}")
+            chapters_list_str = "\n".join(chapters_list)
+            logger.info(f"   ✅ 章节列表提取完成: {len(parse_result.chapters)} 章")
+            logger.info(f"   章节列表预览: {chapters_list_str[:200]}...")
+
         # 根据传入的学科名称获取对应的 DisciplineType
         try:
             discipline_enum = DisciplineType(discipline)
@@ -318,20 +726,75 @@ def process_single_book(
             # 如果传入的学科不在枚举中，默认使用政治学
             discipline_enum = DisciplineType.政治学
             logger.warning(f"⚠️  未知学科 '{discipline}'，使用默认学科：政治学")
-        
-        # 输出综合提示词
-        analyses_str = json.dumps(all_analyses, ensure_ascii=False, indent=2)[:50000]
-        
-        synthesis_prompt = SYNTHESIS_PROMPT.format(
-            book_title=parse_result.metadata.get('title', book_path.stem),
-            author=parse_result.metadata.get('author', 'Unknown'),
-            all_chunk_analyses=analyses_str,
-        )
-        
-        logger.info(f"📡 调用 LLM 生成知识图谱...")
-        
-        # 调用 LLM 生成完整的知识图谱
-        llm_response = call_llm_via_tool(SYSTEM_PROMPT, synthesis_prompt, max_tokens=16384)
+
+        # 🔑 移除截断，发送完整分析结果（避免章节丢失）
+        analyses_str = json.dumps(all_analyses, ensure_ascii=False, indent=2)
+        logger.info(f"   综合生成输入长度: {len(analyses_str)} 字符")
+
+        # 🔑 新增：如果综合输入超过阈值，分段处理避免超时
+        MAX_SYNTHESIS_INPUT = 80000  # 与 MAX_BATCH_CONTENT 保持一致
+        synthesis_responses = []
+
+        if len(analyses_str) > MAX_SYNTHESIS_INPUT:
+            logger.warning(f"   ⚠️ 综合输入过长({len(analyses_str)}字符)，分段处理")
+            # 分割all_analyses为多个部分
+            synthesis_parts = []
+            current_part = []
+            current_length = 0
+
+            for analysis in all_analyses:
+                analysis_str = json.dumps(analysis, ensure_ascii=False)
+                if current_length + len(analysis_str) > MAX_SYNTHESIS_INPUT and current_part:
+                    synthesis_parts.append(current_part)
+                    current_part = []
+                    current_length = 0
+                current_part.append(analysis)
+                current_length += len(analysis_str)
+
+            if current_part:
+                synthesis_parts.append(current_part)
+
+            logger.info(f"   📦 分割为 {len(synthesis_parts)} 部分")
+            for i, part in enumerate(synthesis_parts):
+                part_str = json.dumps(part, ensure_ascii=False, indent=2)
+                part_prompt = SYNTHESIS_PROMPT.format(
+                    book_title=parse_result.metadata.get('title', book_path.stem),
+                    author=parse_result.metadata.get('author', 'Unknown'),
+                    chapters_list=chapters_list_str,
+                    all_chunk_analyses=part_str,
+                )
+                logger.info(f"   📡 处理部分 {i+1}/{len(synthesis_parts)} ({len(part_str)}字符)")
+                part_response = call_llm_via_tool(SYSTEM_PROMPT, part_prompt, max_tokens=8192)
+                if part_response:
+                    synthesis_responses.append(part_response)
+                    logger.info(f"   ✅ 部分 {i+1} 完成")
+
+            # 合成多个部分的响应
+            if synthesis_responses:
+                combined_prompt = f"""请综合以下{len(synthesis_responses)}个部分的分析结果，生成统一的书籍知识图谱（包含metadata、chapters、core_concepts、key_insights）：
+
+书籍：{parse_result.metadata.get('title', book_path.stem)}
+作者：{parse_result.metadata.get('author', 'Unknown')}
+章节列表：
+{chapters_list_str}
+
+各部分分析：
+"""
+                for i, resp in enumerate(synthesis_responses):
+                    combined_prompt += f"\n--- 部分{i+1} ---\n{resp}\n"
+
+                logger.info(f"   🔮 合成 {len(synthesis_responses)} 个部分结果")
+                llm_response = call_llm_via_tool(SYSTEM_PROMPT, combined_prompt, max_tokens=8192)
+            else:
+                llm_response = None
+        else:
+            synthesis_prompt = SYNTHESIS_PROMPT.format(
+                book_title=parse_result.metadata.get('title', book_path.stem),
+                author=parse_result.metadata.get('author', 'Unknown'),
+                chapters_list=chapters_list_str,  # 🔑 传入完整章节列表
+                all_chunk_analyses=analyses_str,
+            )
+            llm_response = call_llm_via_tool(SYSTEM_PROMPT, synthesis_prompt, max_tokens=8192)  # 🔑 降低到8K，避免API超时
 
         # ═══════════════════════════════════════════════════════════
         # 重要：当 LLM 工具调用返回 None 时，表示需要 Hermes/Claude Code 处理
@@ -352,33 +815,93 @@ def process_single_book(
                 # 尝试提取 JSON
                 json_start = llm_response.find('{')
                 json_end = llm_response.rfind('}') + 1
-                
+
                 if json_start >= 0 and json_end > json_start:
                     json_str = llm_response[json_start:json_end]
                 else:
                     json_str = llm_response
-                
+
                 book_graph_data = json.loads(json_str)
                 logger.info(f"✅ JSON 解析成功")
             except json.JSONDecodeError as e:
-                logger.warning(f"⚠️  JSON 解析失败：{e}，尝试使用原始响应")
-                book_graph_data = {}
+                logger.warning(f"⚠️  JSON 解析失败：{e}，尝试修复...")
+                # 🔑 根本修复：补全括号并重试
+                try:
+                    open_braces = json_str.count('{')
+                    close_braces = json_str.count('}')
+                    if open_braces > close_braces:
+                        json_str_fixed = json_str + '}' * (open_braces - close_braces)
+                        book_graph_data = json.loads(json_str_fixed)
+                        logger.info(f"✅ JSON 修复成功（补全括号）")
+                    else:
+                        # 🔑 备用方案：使用分块分析结果直接构建
+                        logger.warning("⚠️  JSON修复失败，使用分块分析结果")
+                        book_graph_data = {
+                            'metadata': {'title': parse_result.metadata.get('title', book_path.stem)},
+                            'chapters': [],
+                            'core_concepts': [],
+                            'key_insights': [],
+                        }
+                        # 从all_analyses提取概念和洞见
+                        for analysis in all_analyses:
+                            if isinstance(analysis, dict):
+                                if 'core_concepts' in analysis:
+                                    for c in analysis.get('core_concepts', []):
+                                        if isinstance(c, dict) and 'concept' in c:
+                                            book_graph_data['core_concepts'].append({
+                                                'name': c.get('concept', ''),
+                                                'definition': c.get('definition', ''),
+                                            })
+                                if 'key_insights' in analysis:
+                                    for i in analysis.get('key_insights', []):
+                                        if isinstance(i, dict) and 'insight' in i:
+                                            book_graph_data['key_insights'].append({
+                                                'title': i.get('insight', ''),
+                                                'description': i.get('logic_chain', ''),
+                                            })
+                        logger.info(f"✅ 从分块分析提取：{len(book_graph_data.get('core_concepts', []))}概念，{len(book_graph_data.get('key_insights', []))}洞见")
+                except Exception as fix_error:
+                    logger.error(f"❌ JSON 修复失败：{fix_error}")
+                    book_graph_data = {}
         else:
             logger.warning("⚠️  LLM 调用未获取响应")
         
+        # ═══════════════════════════════════════════════════════════════════════
+        # Wikipedia 信息补充（减少 LLM 调用）
+        # ═══════════════════════════════════════════════════════════════════════
+        wiki_enricher = WikipediaEnricher()
+        wiki_info = None
+        author = parse_result.metadata.get('author', 'Unknown')
+        book_title = parse_result.metadata.get('title', book_path.stem)
+
+        if author != 'Unknown':
+            logger.info(f"📚 Wikipedia 补充作者信息: {author}")
+            try:
+                wiki_info = wiki_enricher.enrich_book_metadata(book_title, author)
+            except Exception as e:
+                logger.warning(f"⚠️ Wikipedia 补充失败（跳过继续处理）: {e}")
+                wiki_info = None
+
         # 从 LLM 响应构建 BookGraph，如果失败则使用合理的默认值
         from schemas.book_graph_schema import (
             BookGraph, BookMetadata, TimeBackground, CriticalAnalysis,
             ChapterSummary, CoreConcept, KeyInsight, KeyCase, KeyQuote
         )
-        
-        # 提取元数据
+
+        # 提取元数据（优先使用 Wikipedia 信息）
         meta = book_graph_data.get('metadata', {})
+        author_intro = meta.get('author_intro')
+        if not author_intro and wiki_info and wiki_info.author_intro:
+            author_intro = wiki_info.author_intro
+            logger.info(f"✅ 使用 Wikipedia 作者简介（节省约 {len(wiki_info.author_intro)*0.5:.0f} tokens）")
+        if not author_intro:
+            author_intro = f"{author}是本书的作者，其思想和理论对{discipline}领域产生了重要影响。"
+
         book_graph = BookGraph(
             metadata=BookMetadata(
-                title=meta.get('title', parse_result.metadata.get('title', book_path.stem)),
-                author=meta.get('author', parse_result.metadata.get('author', 'Unknown')),
-                author_intro=meta.get('author_intro', f"{meta.get('author', '作者')}是本书的作者，其思想和理论对{discipline}领域产生了重要影响。"),
+                title=meta.get('title', book_title),
+                author=meta.get('author', author),
+                author_intro=author_intro,
                 year_published=meta.get('year_published'),
                 category=meta.get('category', [discipline]),
                 discipline=discipline_enum,
@@ -529,27 +1052,37 @@ def process_single_book(
         logger.info("🔄 更新学科图谱...")
         
         discipline_manager.update_discipline_graph(discipline, book_graph)
-        
+
         # ═══════════════════════════════════════════════════
         # Step 10: 输出处理报告
         # ═══════════════════════════════════════════════════
         elapsed_time = time.time() - start_time
-        
+
         result["success"] = True
         result["discipline"] = discipline
         result["elapsed_time"] = elapsed_time
         result["chapter_count"] = len(parse_result.chapters)
-        
+
+        # Token 节省统计
+        if wiki_enricher:
+            tokens_saved = wiki_enricher.get_token_savings()
+            result["tokens_saved"] = tokens_saved
+
         logger.info("="*60)
         logger.info(f"✅ 处理完成：{book_path.name}")
         logger.info(f"   学科：{discipline}")
         logger.info(f"   输出：{output_path}")
         logger.info(f"   耗时：{elapsed_time:.2f}秒")
         logger.info(f"   章节：{result['chapter_count']}")
+        if wiki_enricher:
+            logger.info(f"   💰 Token节省：{tokens_saved}")
         logger.info("="*60)
         
     except Exception as e:
+        import traceback
         logger.error(f"❌ 处理失败：{e}")
+        logger.error(f"   完整堆栈:")
+        traceback.print_exc()
         result["error"] = str(e)
     
     # 标记为已处理

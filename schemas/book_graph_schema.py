@@ -5,7 +5,7 @@ BookGraph Schema - 书籍知识图谱数据结构定义
 """
 
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Union
 from enum import Enum
 from datetime import datetime
 
@@ -45,7 +45,7 @@ class BookMetadata(BaseModel):
     discipline: DisciplineType = Field(..., description="所属一级学科")
     sub_discipline: Optional[str] = Field(None, description="所属二级子学科（如：政治哲学属于政治学）")
     tags: List[str] = Field(default_factory=list, description="标签列表")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    related_books: List[Any] = Field(default_factory=list, description="关联书籍（字符串或字典格式）")
 
 
 class TimeBackground(BaseModel):
@@ -60,8 +60,8 @@ class ChapterSummary(BaseModel):
     chapter_number: str = Field(..., description="章节编号")
     title: str = Field(..., description="章节标题")
     core_argument: str = Field(..., description="核心论点")
-    underlying_logic: str = Field(..., description="底层逻辑 - 三行格式：前提假设\\n推理链条\\n核心结论")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    underlying_logic: str = Field(..., description="底层逻辑 - 单行箭头格式：前提假设：[内容]→推理链条：[内容]→核心结论：[内容]")
+    related_books: List[Union[str, Dict]] = Field(default_factory=list, description="关联书籍（支持字符串或字典格式）")
     critical_questions: List[str] = Field(default_factory=list, description="批判性问题列表")
 
 
@@ -74,7 +74,7 @@ class CoreConcept(BaseModel):
     development_stages: List[Dict[str, Any]] = Field(default_factory=list, description="发展阶段列表")
     core_drivers: List[str] = Field(default_factory=list, description="发展核心动力")
     critical_review: str = Field(..., description="批判性审视")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    related_books: List[Union[str, Dict]] = Field(default_factory=list, description="关联书籍（支持字符串或字典格式）")
 
 
 class KeyInsight(BaseModel):
@@ -83,7 +83,7 @@ class KeyInsight(BaseModel):
     description: str = Field(..., description="洞见描述")
     underlying_logic: str = Field(..., description="底层逻辑")
     deep_assumptions: List[str] = Field(default_factory=list, description="深层假设列表")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    related_books: List[Union[str, Dict]] = Field(default_factory=list, description="关联书籍（支持字符串或字典格式）")
     controversies: str = Field(..., description="潜在争议")
     multi_perspectives: Dict[str, str] = Field(default_factory=dict, description="多维审视 - 视角：解读")
 
@@ -95,7 +95,7 @@ class KeyCase(BaseModel):
     event_description: str = Field(..., description="事件描述")
     development_stages: List[Dict[str, Any]] = Field(default_factory=list, description="案例发展阶段分析")
     core_drivers: List[str] = Field(default_factory=list, description="发展核心动力")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    related_books: List[Union[str, Dict]] = Field(default_factory=list, description="关联书籍（支持字符串或字典格式）")
     historical_limitations: str = Field(..., description="历史局限性")
 
 
@@ -107,7 +107,7 @@ class KeyQuote(BaseModel):
     background_context: str = Field(..., description="时代背景关联")
     underlying_logic: str = Field(..., description="底层逻辑")
     common_misreading: Optional[str] = Field(None, description="常见误读")
-    related_books: List[str] = Field(default_factory=list, description="关联书籍")
+    related_books: List[Any] = Field(default_factory=list, description="关联书籍（字符串或字典格式）")
 
 
 class CriticalAnalysis(BaseModel):

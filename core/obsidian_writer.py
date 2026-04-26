@@ -113,12 +113,11 @@ class ObsidianWriter:
         discipline_dir.mkdir(parents=True, exist_ok=True)
         
         file_path = discipline_dir / f"{discipline}学科图谱.md"
-        
-        # 如果文件已存在，直接删除
+
+        # 如果文件已存在，创建备份
         if file_path.exists():
-            file_path.unlink()
-            print(f"🗑️ 已删除旧学科图谱：{file_path}")
-        
+            self._create_backup(file_path)
+
         # 写入文件
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)

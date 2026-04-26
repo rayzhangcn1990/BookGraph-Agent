@@ -4,7 +4,7 @@ OCR Engine - 光学字符识别引擎
 支持双引擎切换（PaddleOCR / Tesseract），处理图片型 PDF。
 """
 
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 from pathlib import Path
 import re
 import json

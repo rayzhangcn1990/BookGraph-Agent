@@ -1,0 +1,44 @@
+# BookGraph-Agent 配置
+# 默认使用 Claude API（DashScope 代理）
+
+llm:
+  provider: "ollama"  # claude / ollama
+  base_url: "http://127.0.0.1:11434"
+  model: "qwen2.5:7b"
+  temperature: 0.2
+  max_tokens: 4096
+  timeout: 300
+
+batch:
+  size: 3
+  max_workers: 1
+  retry_attempts: 3
+  retry_delay: 2
+
+cache:
+  enabled: true
+  backend: "disk"
+  dir: "output/cache"
+  ttl: 2592000
+
+preprocessing:
+  language: "zh"
+  min_sentence_length: 10
+  max_chunk_tokens: 1000
+
+graph:
+  remove_redundant_edges: true
+  detect_communities: true
+  min_edge_confidence: 0.3
+  max_nodes_display: 300
+
+visualization:
+  output_formats: ["html", "json"]
+  layout: "spring"
+  interactive: true
+
+logging:
+  level: "INFO"
+  console: true
+  file: true
+  file_path: "logs/bookgraph.log"

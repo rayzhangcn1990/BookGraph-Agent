@@ -31,14 +31,67 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  # LLM 通过 Hermes Agent 工具调用，无需在此配置
-  # 使用 Hermes 内置模型 (qwen3.5-plus) 或 Claude Code
+  provider: "anthropic"        # anthropic / dashscope / openai / multi
+  model: "qwen/qwen3-coder-480b-a35b-instruct"  # NVIDIA NIM 最强推理模型
+  api_base: "http://localhost:18765"
+  api_key: "unused"
   max_tokens: 16384
   temperature: 0.3
-  chunk_size: 30000        # 每块字符数
+  chunk_size: 25000
+  merge_threshold: 15000
   max_retries: 5
   retry_delay: 10
-  timeout: 600             # 增加到 600 秒
+  timeout: 600
+
+  # 🔑 多API源配置（额度独立，自动切换）
+  api_sources:
+    # 🔑 NVIDIA NIM 专用源（无区域限制，多模型可用）
+    - name: "nvidia-nim"
+      api_base: "http://localhost:18765/v1"
+      api_key: "unused"
+      priority: 1
+      quota_type: "shared"
+      preferred_models:
+        - "qwen/qwen3-coder-480b-a35b-instruct"  # 强推理模型
+        - "moonshotai/kimi-k2-instruct"          # Moonshot Kimi
+        - "meta/llama-3.1-70b-instruct"          # Llama 3.1 70B
+        - "nvidia/llama-3.3-nemotron-super-49b-v1"
+
+    - name: "openrelay"
+      api_base: "http://localhost:18765/v1"
+      api_key: "unused"
+      priority: 2
+      quota_type: "shared"
+
+    - name: "openrouter"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_API_KEY}"
+      priority: 3
+      quota_type: "independent"
+
+    - name: "openrouter-gemini"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_GEMINI_API_KEY}"
+      priority: 4
+      quota_type: "independent"
+
+    - name: "openrouter-nvidia"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_NVIDIA_API_KEY}"
+      priority: 5
+      quota_type: "independent"
+
+    - name: "openrouter-dashscope"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_DASHSCOPE_API_KEY}"
+      priority: 6
+      quota_type: "independent"
+
+    - name: "openrouter-main"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_MAIN_API_KEY}"
+      priority: 7
+      quota_type: "independent"
 
 batch:
   max_workers: 1           # 并发数（设置为 1，串行处理）

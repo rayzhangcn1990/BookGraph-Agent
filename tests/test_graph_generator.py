@@ -195,8 +195,11 @@ class TestBookGraphMarkdown:
 
         markdown = generator.generate_book_graph_markdown(book_graph)
 
-        # 检查主要章节标题
-        assert "# 测试书籍" in markdown
+        # Obsidian 格式：标题在 frontmatter，不需要一级标题
+        # 检查 frontmatter 中的 title
+        assert "title: 测试书籍" in markdown
+
+        # 检查二级章节标题（Obsidian 最佳实践）
         assert "## 📜 时代背景" in markdown
         assert "## 💡 核心概念" in markdown
         assert "## 🔍 关键洞见" in markdown
@@ -237,7 +240,8 @@ class TestBookGraphMarkdown:
 
         markdown = generator.generate_book_graph_markdown(book_graph)
 
-        assert "# 空书籍" in markdown
+        # Obsidian 格式：标题在 frontmatter
+        assert "title: 空书籍" in markdown
         assert isinstance(markdown, str)
 
 
