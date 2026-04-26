@@ -35,18 +35,18 @@ class GraphGenerator:
 
     def _clean_placeholder(self, text: str, default: str = "") -> str:
         """
-        清理 LLM 返回的占位符内容
-        
+        清理 LLM 返回的占位符内容和模板化内容
+
         Args:
             text: 原始文本
             default: 默认替换值（空字符串表示直接移除）
-            
+
         Returns:
             str: 清理后的文本
         """
         if not text:
             return default
-        
+
         # 常见的占位符模式
         placeholders = [
             "待分析", "待补充", "待填写", "待生成",
@@ -55,13 +55,113 @@ class GraphGenerator:
             "（此处内容由 LLM 生成）",
             "（内容由模型生成）",
         ]
-        
+
         cleaned = text.strip()
         for ph in placeholders:
             if cleaned == ph or cleaned.startswith(ph) or ph in cleaned:
                 return default
-        
+
+        # 检测模板化内容（通用占位句式）
+        template_patterns = [
+            "本章探讨了书中的核心议题",
+            "作者通过逻辑推理展开论述",
+            "本章探讨了",
+            "本章分析了",
+            "本章讨论了",
+            "本章阐述了",
+            "通过逻辑推理",
+            "展开论述",
+            "进行系统性阐述",
+            "提供了新的分析框架",
+            "提供了新的解决方案",
+        ]
+
+        for pattern in template_patterns:
+            if pattern in cleaned:
+                return default
+
         return cleaned
+
+    def _is_valid_chapter_title(self, title: str) -> bool:
+        """
+        校验章节标题是否有效
+
+        Args:
+            title: 章节标题
+
+        Returns:
+            bool: 是否是有效的章节标题
+        """
+        if not title:
+            return False
+
+        # 过长标题（超过100字符）可能是正文片段
+        if len(title) > 100:
+            return False
+
+        # 检测正文片段特征
+        invalid_patterns = [
+            "第一，",
+            "第二天早上",
+            "按照安排",
+            "▲",
+            "★",
+            "●",
+            "◆",
+            "◇",
+            "◆◆",
+            "◆◆◆",
+            "...",
+            "……",
+            "等等",
+            "例如",
+            "比如",
+            "如下",
+        ]
+
+        for pattern in invalid_patterns:
+            if title.startswith(pattern) or pattern in title[:20]:
+                return False
+
+        # 检测是否包含完整句子特征（可能是正文片段）
+        sentence_patterns = [
+            "，你就有可能",
+            "对自己所作的一切",
+            "按照安排抵达",
+            "找出脆弱的环节",
+            "被征服者的内心",
+        ]
+
+        for pattern in sentence_patterns:
+            if pattern in title:
+                return False
+
+        return True
+
+    def _validate_chapters(self, chapters: List) -> List:
+        """
+        校验并过滤无效章节
+
+        Args:
+            chapters: 章节列表
+
+        Returns:
+            List: 过滤后的有效章节列表
+        """
+        valid_chapters = []
+        for chapter in chapters:
+            if self._is_valid_chapter_title(chapter.title):
+                # 同时校验核心论点是否是模板化内容
+                core_arg_cleaned = self._clean_placeholder(chapter.core_argument)
+                logic_cleaned = self._clean_placeholder(chapter.underlying_logic)
+
+                # 如果核心论点和底层逻辑都被过滤，说明是模板化章节，跳过
+                if not core_arg_cleaned and not logic_cleaned:
+                    continue
+
+                valid_chapters.append(chapter)
+
+        return valid_chapters
     
     
     def generate_book_graph_markdown(self, book_graph: BookGraph) -> str:
@@ -153,20 +253,32 @@ class GraphGenerator:
         lines.append("")
         lines.append("## 📑 章节结构总览")
         lines.append("")
-        lines.append("| 章节 | 主题 | 核心论点 | 底层逻辑 | 关联笔记 |")
-        lines.append("|------|------|----------|----------|----------|")
-        
-        for chapter in book_graph.chapters:
-            related = ", ".join([f"[[{b}]]" for b in chapter.related_books[:3]]) if chapter.related_books else "-"
-            # 核心论点和底层逻辑保持完整，不截断，替换特殊字符避免破坏表格
-            core_arg = chapter.core_argument.replace("|", "｜").replace("\n", " ").strip()
-            logic = chapter.underlying_logic.replace("|", "｜").replace("\n", " ").strip()
 
-            lines.append(
-                f"| {chapter.chapter_number} | {chapter.title} | "
-                f"{core_arg} | "
-                f"{logic} | {related} |"
-            )
+        # 校验并过滤无效章节
+        valid_chapters = self._validate_chapters(book_graph.chapters)
+
+        if not valid_chapters:
+            # 如果没有有效章节，显示警告信息
+            lines.append("> [!warning] ⚠️ 章节结构解析异常")
+            lines.append("> 章节内容未能正确解析，可能需要重新处理本书。")
+            lines.append("")
+        else:
+            lines.append("| 章节 | 主题 | 核心论点 | 底层逻辑 | 关联笔记 |")
+            lines.append("|------|------|----------|----------|----------|")
+
+            for chapter in valid_chapters:
+                related = ", ".join([f"[[{b}]]" for b in chapter.related_books[:3]]) if chapter.related_books else "-"
+                # 核心论点和底层逻辑保持完整，不截断，替换特殊字符避免破坏表格
+                core_arg = self._clean_placeholder(chapter.core_argument, "-")
+                core_arg = core_arg.replace("|", "｜").replace("\n", " ").strip()
+                logic = self._clean_placeholder(chapter.underlying_logic, "-")
+                logic = logic.replace("|", "｜").replace("\n", " ").strip()
+
+                lines.append(
+                    f"| {chapter.chapter_number} | {chapter.title} | "
+                    f"{core_arg} | "
+                    f"{logic} | {related} |"
+                )
         lines.append("")
         
         # ═══════════════════════════════════════════════════

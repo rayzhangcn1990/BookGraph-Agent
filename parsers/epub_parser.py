@@ -215,10 +215,15 @@ class EpubParser(BaseParser):
             if heading:
                 text = heading.get_text(strip=True)
                 # 检查是否是有效标题（包含中文或有效内容）
-                if text and len(text) > 2 and (any('一' <= c <= '鿿' for c in text) or text[0].isalpha()):
-                    # 排除常见的占位符
-                    if text.lower() not in ['chapter', 'section', 'content', 'index', 'toc']:
-                        return text
+                if text and len(text) > 2 and len(text) <= 50:
+                    # 必须包含中文字符或有意义的英文单词
+                    has_chinese = any('一' <= c <= '鿿' for c in text)
+                    has_valid_word = any(word.len() >= 3 for word in text.split()) if not has_chinese else True
+                    if has_chinese or has_valid_word:
+                        # 排除常见的占位符
+                        placeholders = ['chapter', 'section', 'content', 'index', 'toc', 'nav', 'part', 'text', 'split', 'ch']
+                        if not any(text.lower().startswith(p) for p in placeholders):
+                            return text
 
         # 尝试从第一个包含"章"、"节"、"第"的段落提取
         body = soup.find('body') or soup
@@ -226,27 +231,41 @@ class EpubParser(BaseParser):
             text = element.get_text(strip=True)
             # 匹配章节标题格式：如 "第一章 xxx", "第1章 xxx", "第1节 xxx"
             if text and ('章' in text[:10] or '节' in text[:10] or (text.startswith('第') and len(text) > 3)):
-                # 截取合理的标题长度（通常不超过50字）
-                if len(text) <= 50:
-                    return text
-                # 如果太长，可能包含正文，截取前30字
-                return text[:30].strip()
+                # 必须以"第"开头或包含明确的章节标记
+                if text.startswith('第') or '第' in text[:5]:
+                    # 截取合理的标题长度（通常不超过30字）
+                    if len(text) <= 30:
+                        return text
+                    # 如果太长，可能包含正文，截取前20字
+                    return text[:20].strip()
 
         # 尝试从 title 标签提取
         title_tag = soup.find('title')
         if title_tag:
             text = title_tag.get_text(strip=True)
-            if text and text.lower() not in ['untitled', 'no title', '']:
-                return text
+            # 排除占位符
+            placeholders = ['untitled', 'no title', '', 'part', 'text', 'split', 'ch', 'index', 'nav']
+            if text and not any(text.lower().startswith(p) for p in placeholders):
+                if len(text) <= 30 and (any('一' <= c <= '鿿' for c in text) or text[0].isalpha()):
+                    return text
 
         # 尝试从文件名提取（但排除占位符）
         if hasattr(doc_item, 'file_name'):
             name = Path(doc_item.file_name).stem
-            # 排除常见的占位符文件名
-            placeholder_patterns = ['chapter', 'ch', 'index', 'split', 'section', 'content', 'page', 'nav', 'toc']
+            # 排除常见的占位符文件名（增强版）
+            placeholder_patterns = [
+                'chapter', 'ch', 'index', 'split', 'section', 'content',
+                'page', 'nav', 'toc', 'part', 'text', '000', '001',
+                'nav', 'ncx', 'opf', 'cover', 'titlepage'
+            ]
+            # 如果文件名全是数字或数字+字母组合，跳过
             if name and not any(name.lower().startswith(p) for p in placeholder_patterns):
+                # 检查是否是 part0000、text00001 这种格式
+                import re
+                if re.match(r'^(part|text|ch|split)\d+$', name.lower()):
+                    return ""
                 # 检查是否包含有效内容
-                if any('一' <= c <= '鿿' for c in name) or (name[0].isalpha() and len(name) > 3):
+                if any('一' <= c <= '鿿' for c in name) or (name[0].isalpha() and len(name) > 3 and not name.isdigit()):
                     return name
 
         return ""
