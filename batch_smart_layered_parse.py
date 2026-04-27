@@ -38,8 +38,8 @@ import httpx
 # ═══════════════════════════════════════════════════════════
 
 SHORT_BOOK_THRESHOLD = 50000  # 字符数阈值
-MAX_SHORT_BOOKS_PARALLEL = 8  # 短书最大并行数
-MAX_LONG_BOOK_MODELS = 4      # 长书最大并行模型数
+MAX_SHORT_BOOKS_PARALLEL = 12  # 短书最大并行数（提升至12）
+MAX_LONG_BOOK_MODELS = 12      # 长书最大并行模型数（提升至12）
 
 
 @dataclass
@@ -206,16 +206,16 @@ async def synthesize_results(
     llm_config = config.get("llm", {})
     api_sources = llm_config.get("api_sources", [])
 
-    # 选择最佳 API 源
+    # 🔑 修复：优先使用本地 NVIDIA NIM API（无认证限制）
     api_source = None
     for source in api_sources:
-        if "openrouter" in source.get("name", "").lower() and "main" in source.get("name", "").lower():
+        if "nvidia-nim" in source.get("name", "").lower() or "localhost" in source.get("api_base", "").lower():
             api_source = source
             break
 
     if not api_source:
         for source in api_sources:
-            if "openrouter" in source.get("name", "").lower():
+            if "openrelay" in source.get("name", "").lower():
                 api_source = source
                 break
 
@@ -226,8 +226,9 @@ async def synthesize_results(
         raise Exception("没有可用的 API 源")
 
     api_base = api_source["api_base"]
-    api_key = api_source["api_key"]
-    model = "claude-sonnet-4.6"
+    api_key = api_source.get("api_key", "unused")
+    # 🔑 使用本地可用的模型（与 chunk 处理一致）
+    model = "meta/llama-3.1-405b-instruct"
 
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -248,7 +249,7 @@ async def synthesize_results(
         all_chunk_analyses=analyses_json,
     )
 
-    logger.info(f"   🧠 综合分析中... (使用 {model})")
+    logger.info(f"   🧠 综合分析中... (使用 {model} via {api_source['name']})")
 
     async with httpx.AsyncClient(timeout=300) as client:
         response = await client.post(
