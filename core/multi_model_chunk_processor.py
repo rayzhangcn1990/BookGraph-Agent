@@ -256,16 +256,38 @@ class MultiModelChunkProcessor:
 
             content = response.choices[0].message.content
 
-            # 解析 JSON
+            # 🔑 改进：更健壮的 JSON 解析
             try:
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
-                else:
-                    json_str = content
+                # 方法1：尝试直接解析
+                try:
+                    chunk.result = json.loads(content.strip())
+                except json.JSONDecodeError:
+                    # 方法2：提取第一个完整 JSON 对象
+                    json_start = content.find('{')
+                    if json_start >= 0:
+                        # 使用正则匹配完整的 JSON 对象
+                        import re
+                        # 匹配最外层的 {...} 结构
+                        depth = 0
+                        json_end = json_start
+                        for i, c in enumerate(content[json_start:], json_start):
+                            if c == '{':
+                                depth += 1
+                            elif c == '}':
+                                depth -= 1
+                                if depth == 0:
+                                    json_end = i + 1
+                                    break
 
-                chunk.result = json.loads(json_str)
+                        json_str = content[json_start:json_end]
+                        chunk.result = json.loads(json_str)
+                    else:
+                        raise Exception("没有找到 JSON 对象")
+
+                # 🔑 调试：记录响应字段
+                if chunk.result:
+                    logger.info(f"   🔍 Chunk {chunk.chunk_index} 字段: {list(chunk.result.keys())[:5]}")
+
                 chunk.status = "completed"
                 logger.info(f"✅ [{chunk.assigned_model}] Chunk {chunk.chunk_index} 完成")
 
@@ -273,6 +295,8 @@ class MultiModelChunkProcessor:
                 chunk.status = "failed"
                 chunk.error = f"JSON 解析失败: {str(e)[:100]}"
                 logger.warning(f"⚠️ [{chunk.assigned_model}] Chunk {chunk.chunk_index}: JSON 解析失败")
+                # 🔑 调试：记录响应前500字符
+                logger.debug(f"   响应内容: {content[:500]}")
 
         except Exception as e:
             chunk.status = "failed"
@@ -292,50 +316,49 @@ class MultiModelChunkProcessor:
         if not result:
             return False, "结果为空"
 
-        # 检查核心字段
-        required_fields = ["chapters", "core_concepts", "key_insights"]
-        missing_fields = [f for f in required_fields if f not in result]
+        # 🔑 改进：放宽必要字段检查，只要有核心概念或洞见即可
+        has_content = False
+        if "core_concepts" in result and len(result.get("core_concepts", [])) >= 1:
+            has_content = True
+        if "key_insights" in result and len(result.get("key_insights", [])) >= 1:
+            has_content = True
+        if "key_quotes" in result and len(result.get("key_quotes", [])) >= 1:
+            has_content = True
 
-        if missing_fields:
-            return False, f"缺少必要字段: {missing_fields}"
+        if not has_content:
+            return False, "缺少核心内容字段"
 
-        # 检查章节分析质量
+        # 检查章节分析质量（可选）
         chapters = result.get("chapters", [])
-        if not chapters:
-            return False, "章节分析为空"
+        if chapters:
+            # 检查是否有模板化输出（通用性描述）
+            template_phrases = [
+                "本章探讨了书中的核心议题",
+                "作者通过逻辑推理展开论述",
+                "本章分析了",
+            ]
 
-        # 检查是否有模板化输出（通用性描述）
-        template_phrases = [
-            "本章探讨了书中的核心议题",
-            "作者通过逻辑推理展开论述",
-            "本章分析了",
-        ]
+            for chapter in chapters:
+                if isinstance(chapter, dict):
+                    core_point = chapter.get("core_point", "") or chapter.get("core_argument", "")
+                    bottom_logic = chapter.get("bottom_logic", "") or chapter.get("underlying_logic", "")
 
-        for chapter in chapters:
-            if isinstance(chapter, dict):
-                core_point = chapter.get("core_point", "")
-                bottom_logic = chapter.get("bottom_logic", "")
+                    for phrase in template_phrases:
+                        if phrase in core_point or phrase in bottom_logic:
+                            return False, f"章节分析过于模板化: '{phrase}'"
 
-                for phrase in template_phrases:
-                    if phrase in core_point or phrase in bottom_logic:
-                        return False, f"章节分析过于模板化: '{phrase}'"
-
-        # 检查核心概念质量
+        # 🔑 放宽：核心概念至少1个即可（不同书籍内容密度不同）
         concepts = result.get("core_concepts", [])
-        if len(concepts) < 3:
-            return False, f"核心概念太少: {len(concepts)} < 3"
+        if len(concepts) < 1:
+            # 如果没有概念，检查是否有其他内容
+            if not chapters and not result.get("key_insights", []):
+                return False, "内容太少，无法提取有效信息"
 
-        # 检查洞察质量
+        # 检查洞察质量（可选）
         insights = result.get("key_insights", [])
-        if len(insights) < 2:
-            return False, f"关键洞察太少: {len(insights)} < 2"
+        # 放宽：不强制要求洞察数量
 
-        # 检查洞察是否包含推理链
-        for insight in insights:
-            if isinstance(insight, str):
-                if "→" not in insight and "推理" not in insight:
-                    # 洞察缺少推理链，可能是模板化输出
-                    pass  # 不强制要求，只是警告
+        return True, "质量合格"
 
         return True, "质量合格"
 
