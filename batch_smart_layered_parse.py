@@ -251,41 +251,75 @@ async def synthesize_results(
 
     logger.info(f"   🧠 综合分析中... (使用 {model} via {api_source['name']})")
 
-    async with httpx.AsyncClient(timeout=300) as client:
-        response = await client.post(
-            f"{api_base.rstrip('/')}/chat/completions",
-            headers=headers,
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": "你是一位政治学知识图谱专家。"},
-                    {"role": "user", "content": prompt}
-                ],
-                "max_tokens": 32768,
-                "temperature": 0.7
-            }
-        )
+    # 🔑 增加超时时间和重试逻辑
+    max_retries = 3
+    for retry in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=600) as client:  # 🔑 超时增加到600秒
+                response = await client.post(
+                    f"{api_base.rstrip('/')}/chat/completions",
+                    headers=headers,
+                    json={
+                        "model": model,
+                        "messages": [
+                            {"role": "system", "content": "你是一位政治学知识图谱专家。"},
+                            {"role": "user", "content": prompt}
+                        ],
+                        "max_tokens": 32768,
+                        "temperature": 0.7
+                    }
+                )
 
-        if response.status_code == 200:
-            data = response.json()
-            content = data["choices"][0]["message"]["content"]
+                if response.status_code == 200:
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"]
 
-            try:
-                json_start = content.find('{')
-                json_end = content.rfind('}') + 1
-                if json_start >= 0 and json_end > json_start:
-                    json_str = content[json_start:json_end]
+                    try:
+                        json_start = content.find('{')
+                        json_end = content.rfind('}') + 1
+                        if json_start >= 0 and json_end > json_start:
+                            json_str = content[json_start:json_end]
+                        else:
+                            json_str = content
+
+                        logger.info(f"   ✅ 综合分析完成")
+                        return json.loads(json_str)
+
+                    except json.JSONDecodeError as e:
+                        logger.error(f"JSON 解析失败: {e}")
+                        if retry < max_retries - 1:
+                            logger.info(f"   🔄 重试 ({retry+2}/{max_retries})...")
+                            continue
+                        raise Exception(f"综合分析 JSON 解析失败: {e}")
+
+                elif response.status_code == 502:
+                    # 🔑 502错误通常需要等待后重试
+                    if retry < max_retries - 1:
+                        logger.warning(f"   ⚠️ HTTP 502, 等待30秒后重试 ({retry+2}/{max_retries})...")
+                        import asyncio
+                        await asyncio.sleep(30)
+                        continue
+                    raise Exception(f"综合分析失败: HTTP {response.status_code} (重试{max_retries}次后)")
+
                 else:
-                    json_str = content
+                    if retry < max_retries - 1:
+                        logger.warning(f"   ⚠️ HTTP {response.status_code}, 重试 ({retry+2}/{max_retries})...")
+                        continue
+                    raise Exception(f"综合分析失败: HTTP {response.status_code}")
 
-                return json.loads(json_str)
+        except httpx.TimeoutException:
+            if retry < max_retries - 1:
+                logger.warning(f"   ⚠️ 请求超时, 重试 ({retry+2}/{max_retries})...")
+                continue
+            raise Exception(f"综合分析超时 (重试{max_retries}次后)")
 
-            except json.JSONDecodeError as e:
-                logger.error(f"JSON 解析失败: {e}")
-                raise Exception(f"综合分析 JSON 解析失败: {e}")
+        except Exception as e:
+            if retry < max_retries - 1:
+                logger.warning(f"   ⚠️ 异常: {str(e)[:50]}, 重试 ({retry+2}/{max_retries})...")
+                continue
+            raise
 
-        else:
-            raise Exception(f"综合分析失败: HTTP {response.status_code}")
+    raise Exception("综合分析失败")
 
 
 # ═══════════════════════════════════════════════════════════
