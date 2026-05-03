@@ -287,13 +287,54 @@ class SkillOrchestrator:
             logger.error(f"解析异常: {e}")
             return []
 
-    def _create_skeleton(self, obsidian_writer, book_title: str, discipline: str):
-        """创建 Obsidian 骨架文件"""
+    def _create_skeleton(self, obsidian_writer, book_title: str, discipline: str, author: str = None):
+        """创建 Obsidian 骨架文件（集成 Wikipedia 信息）"""
         from datetime import datetime
 
+        # 🔑 使用 Wikipedia 获取作者信息和时代背景
+        author_intro = ""
+        time_background = ""
+
+        try:
+            from utils.wikipedia_enricher import WikipediaEnricher
+            wiki = WikipediaEnricher()
+
+            # 1. 先用书名搜索书籍 Wikipedia 页面（可能包含作者信息）
+            book_page = wiki.wiki.page(book_title.replace('.epub', '').replace('.mobi', '').replace('.pdf', ''))
+            if book_page.exists():
+                # 从书籍页面提取作者信息
+                book_summary = book_page.summary[:500]
+                # 尝试提取作者名称
+                if "作者" in book_summary or "作者" in book_summary:
+                    import re
+                    author_match = re.search(r'作者是?[:：]?([^，。,\n]+)', book_summary)
+                    if author_match:
+                        author = author_match.group(1).strip()
+                        logger.info(f"   📚 Wikipedia 提取作者: {author}")
+
+            # 2. 如果有作者名称，搜索作者 Wikipedia 页面
+            if author and author != "未知作者":
+                author_intro = wiki.search_author(author) or ""
+
+            # 3. 尝试从书籍页面获取时代背景
+            if book_page.exists():
+                # 搜索书籍出版年代相关的事件
+                # 提取年份信息
+                import re
+                years = re.findall(r'\b(19\d{2}|20\d{2})\b', book_summary)
+                if years:
+                    # 用第一个年份搜索历史背景
+                    year_event = wiki.search_event(f"{years[0]}年")
+                    if year_event:
+                        time_background = year_event
+
+        except Exception as e:
+            logger.warning(f"   ⚠️ Wikipedia 查询失败: {e}")
+
+        # 构建骨架（包含 Wikipedia 信息 + 强化视觉区分）
         skeleton = f"""---
 title: {book_title}
-author: 未知作者
+author: {author or "未知作者"}
 discipline: {discipline}
 year_published: null
 tags: []
@@ -303,37 +344,84 @@ created: {datetime.now().strftime('%Y-%m-%d')}
 type: book-graph
 ---
 
-## 📑 章节结构总览
+# 📖 {book_title}
+
+> [!info] ✍️ 作者简介
+> {author_intro or "待补充"}
+
+---
+
+# 📜 一、时代背景
+
+> [!quote] 🌍 宏观历史背景
+> {time_background or "待补充"}
+
+> [!note] 🔬 微观作者背景
+> 待补充
+
+### ⚡ 核心矛盾
+
+待补充
+
+---
+
+# 📑 二、章节结构总览
 
 > [!info] 正在生成...
 
 ---
 
-## 💡 核心概念
+# 💡 三、核心概念
 
 > [!info] 正在生成...
 
 ---
 
-## 🔍 关键洞见
+# 🔍 四、关键洞见
 
 > [!info] 正在生成...
 
 ---
 
-## 📚 关键案例
+# 📚 五、关键案例
 
 > [!info] 正在生成...
 
 ---
 
-## ✨ 金句萃取
+# ✨ 六、金句萃取
 
 > [!info] 正在生成...
 
 ---
 
-*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}"""
+# 🤔 七、批判性解读
+
+> [!info] 待补充
+
+---
+
+# ⚖️ 八、伦理边界
+
+> [!info] 待补充
+
+---
+
+# 📖 九、学习路径
+
+> [!info] 待补充
+
+---
+
+# 🔗 十、关联书籍网络
+
+> [!info] 待补充
+
+---
+
+*所属学科*: [[{discipline}学科图谱]]
+*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}
+*图谱类型*: 书籍知识图谱"""
 
         # 写入骨架
         try:
