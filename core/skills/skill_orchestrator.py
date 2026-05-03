@@ -114,21 +114,54 @@ class SkillOrchestrator:
         # Step 3: 并发执行所有 Skill
         semaphore = asyncio.Semaphore(self.max_parallel)
 
+        # 🔑 总体超时控制（每本书最多10分钟）
+        total_timeout = self.config.get("batch", {}).get("book_timeout", 600)
+
         async def run_skill(skill: BaseSkill) -> SkillResult:
             async with semaphore:
                 logger.info(f"   ▶️ 开始执行: [{skill.name}]")
-                result = await skill.run_and_write(
-                    llm_client, chunks, book_title,
-                    obsidian_writer, discipline
-                )
-                logger.info(f"   {'✅' if result.success else '❌'} 完成: [{skill.name}]")
-                return result
+                try:
+                    # 🔑 单个Skill超时（最多3分钟）
+                    result = await asyncio.wait_for(
+                        skill.run_and_write(
+                            llm_client, chunks, book_title,
+                            obsidian_writer, discipline
+                        ),
+                        timeout=180  # 3分钟超时
+                    )
+                    logger.info(f"   {'✅' if result.success else '❌'} 完成: [{skill.name}]")
+                    return result
+                except asyncio.TimeoutError:
+                    logger.error(f"   ❌ [{skill.name}] 超时（180s）")
+                    return SkillResult(
+                        skill_name=skill.name,
+                        success=False,
+                        result=None,
+                        errors=["Skill执行超时"],
+                        elapsed_seconds=180
+                    )
 
-        # 并发执行
-        results = await asyncio.gather(
-            *[run_skill(skill) for skill in self.skills],
-            return_exceptions=True
-        )
+        # 并发执行（带总体超时）
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[run_skill(skill) for skill in self.skills],
+                    return_exceptions=True
+                ),
+                timeout=total_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 书籍处理总超时（{total_timeout}s）")
+            # 返回部分结果
+            results = []
+            for skill in self.skills:
+                results.append(SkillResult(
+                    skill_name=skill.name,
+                    success=False,
+                    result=None,
+                    errors=["总体超时"],
+                    elapsed_seconds=total_timeout
+                ))
 
         # Step 4: 汇总结果
         skill_results = []

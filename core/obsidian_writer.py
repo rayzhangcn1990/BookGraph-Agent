@@ -78,16 +78,32 @@ class ObsidianWriter:
         book_title = self._sanitize_filename(book_graph.metadata.title)
         file_path = books_dir / f"{book_title}.md"
         
-        # 如果文件已存在，直接删除
-        if file_path.exists():
-            file_path.unlink()
-            print(f"🗑️ 已删除旧文件：{file_path}")
-        
-        # 写入文件
-        with open(file_path, 'w', encoding='utf-8') as f:
-            f.write(markdown_content)
-        
-        print(f"✅ 书籍图谱已写入：{file_path}")
+        # 🔑 原子写入：先写临时文件，再rename
+        import tempfile
+        temp_file = tempfile.NamedTemporaryFile(
+            mode='w',
+            encoding='utf-8',
+            suffix='.md',
+            dir=books_dir,
+            delete=False
+        )
+
+        try:
+            temp_file.write(markdown_content)
+            temp_file.close()
+
+            # 删除旧文件（如果存在）
+            if file_path.exists():
+                file_path.unlink()
+
+            # Rename临时文件为正式文件
+            Path(temp_file.name).rename(file_path)
+            print(f"✅ 书籍图谱已写入：{file_path}")
+
+        except Exception as e:
+            # 写入失败，清理临时文件
+            Path(temp_file.name).unlink(missing_ok=True)
+            raise e
         return file_path.resolve()
 
 
