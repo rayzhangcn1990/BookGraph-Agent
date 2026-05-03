@@ -18,6 +18,7 @@ obsidian:
     文学: "📚 知识图谱/文学"
     科学: "📚 知识图谱/科学"
     技术: "📚 知识图谱/技术"
+    思维: "📚 知识图谱/思维"
 
   # 二级子学科配置（可选，用于更细分分类）
   # 书籍默认存放在一级学科目录，如需单独建立子学科目录可在此配置
@@ -31,8 +32,8 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  provider: "anthropic"        # anthropic / dashscope / openai / multi
-  model: "qwen/qwen3-coder-480b-a35b-instruct"  # NVIDIA NIM 最强推理模型
+  provider: "anthropic"
+  model: "nvidia/llama-3.3-nemotron-super-49b-v1"  # NVIDIA NIM正常
   api_base: "http://localhost:18765"
   api_key: "unused"
   max_tokens: 16384
@@ -41,11 +42,34 @@ llm:
   merge_threshold: 15000
   max_retries: 5
   retry_delay: 10
-  timeout: 600
+  timeout: 240           # 🔑 综合分析超时（从900降到240秒，提升响应速度）
 
   # 🔑 多API源配置（额度独立，自动切换）
+  # 🔑 2026-05-03 13:18更新：NVIDIA NIM恢复正常，优先使用
   api_sources:
-    # 🔑 NVIDIA NIM 专用源（无区域限制，多模型可用）
+    # 🏆 第一优先：NVIDIA NIM（刚刚验证可用）
+    - name: "nvidia-nim-direct"
+      api_base: "https://integrate.api.nvidia.com/v1"
+      api_key: "${NVIDIA_NIM_API_KEY}"
+      priority: 1
+      quota_type: "independent"
+      preferred_models:
+        - "nvidia/llama-3.3-nemotron-super-49b-v1"
+        - "meta/llama-3.1-405b-instruct"
+
+    # 第二优先：OpenRouter（当前429限流）
+    - name: "openrouter-direct"
+      api_base: "https://openrouter.ai/api/v1"
+      api_key: "${OPENROUTER_API_KEY}"
+      priority: 2
+      quota_type: "shared"
+      preferred_models:
+        - "nousresearch/hermes-3-llama-3.1-405b:free"
+        - "openai/gpt-oss-120b:free"
+      # ❌ 已排除: minimax/minimax-m2.5:free (成功率50%)
+      # ❌ 已排除: openrouter/free (成功率0%)
+
+    # 备用：本地代理（可能不稳定）
     - name: "nvidia-nim"
       api_base: "http://localhost:18765/v1"
       api_key: "unused"
@@ -69,32 +93,45 @@ llm:
       priority: 3
       quota_type: "independent"
 
+    # 🔑 独立额度轮换（优先级 2，当 shared 额度打爆时自动切换）
     - name: "openrouter-gemini"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_GEMINI_API_KEY}"
-      priority: 4
+      priority: 2
       quota_type: "independent"
+      preferred_models:
+        - "openai/gpt-oss-120b:free"
+        - "nousresearch/hermes-3-llama-3.1-405b:free"
 
     - name: "openrouter-nvidia"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_NVIDIA_API_KEY}"
-      priority: 5
+      priority: 2
       quota_type: "independent"
+      preferred_models:
+        - "openai/gpt-oss-120b:free"
+        - "minimax/minimax-m2.5:free"
 
     - name: "openrouter-dashscope"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_DASHSCOPE_API_KEY}"
-      priority: 6
+      priority: 2
       quota_type: "independent"
+      preferred_models:
+        - "nousresearch/hermes-3-llama-3.1-405b:free"
+        - "minimax/minimax-m2.5:free"
 
     - name: "openrouter-main"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_MAIN_API_KEY}"
-      priority: 7
+      priority: 2
       quota_type: "independent"
+      preferred_models:
+        - "openai/gpt-oss-120b:free"
+        - "nousresearch/hermes-3-llama-3.1-405b:free"
 
 batch:
-  max_workers: 1           # 并发数（设置为 1，串行处理）
+  max_workers: 4         # 🔑 并发数（从1改成4，硬件自适应并行处理）
 
 logging:
   level: "INFO"
@@ -105,7 +142,7 @@ ocr:
   engine: "paddleocr"      # marker / paddleocr / tesseract
   language: "ch"
   dpi: 300
-  timeout: 900
+  timeout: 300             # 🔑 OCR超时（从900降到300秒）
 
 parsing:
   supported_formats:

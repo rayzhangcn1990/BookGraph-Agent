@@ -90,6 +90,70 @@ class ObsidianWriter:
         print(f"✅ 书籍图谱已写入：{file_path}")
         return file_path.resolve()
 
+
+    def update_section(
+        self,
+        discipline: str,
+        book_title: str,
+        section_name: str,
+        section_content: str
+    ) -> Path:
+        """
+        增量更新书籍图谱的某个章节
+        
+        Args:
+            discipline: 学科名称  
+            book_title: 书籍标题
+            section_name: 要更新的章节名称
+            section_content: 章节内容（Markdown格式）
+            
+        Returns:
+            Path: 更新后的文件路径
+        """
+        import re
+        
+        discipline_path = self._get_discipline_path(discipline)
+        books_dir = self.vault_path / discipline_path / self.subdirectories["books"]
+        books_dir.mkdir(parents=True, exist_ok=True)
+        
+        safe_title = self._sanitize_filename(book_title)
+        file_path = books_dir / f"{safe_title}.md"
+        
+        section_headers = {
+            "核心概念": "## 💡 核心概念",
+            "关键洞见": "## 🔍 关键洞见",
+            "章节结构": "## 📑 章节结构总览",
+            "关键案例": "## 📚 关键案例",
+        }
+        
+        target_header = section_headers.get(section_name, f"## {section_name}")
+        
+        if not file_path.exists():
+            skeleton = "---\n" + f"title: {book_title}\ndiscipline: {discipline}\ncreated: {datetime.now().strftime('%Y-%m-%d')}\ntype: book-graph\n---\n\n" + f"{target_header}\n\n{section_content}\n\n---\n\n*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
+            file_path.write_text(skeleton.replace("\n", "\n"), encoding="utf-8")
+            print(f"✅ 创建骨架 → {file_path.name}")
+            return file_path.resolve()
+        
+        content = file_path.read_text(encoding="utf-8")
+
+        # 找到章节并替换
+        pattern = target_header + r"\n\n(.*?)(\n---\n\n## |$)"
+        match = re.search(pattern, content, re.DOTALL)
+        
+        if match:
+            # 替换现有内容
+            start = match.start(1)
+            end = match.end(1)
+            new_content = content[:start] + section_content + content[end:]
+            
+            # 更新时间
+            new_content = re.sub(r"\*最后更新\*: .*", f"*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_content)
+            
+            file_path.write_text(new_content, encoding="utf-8")
+            print(f"✅ 更新 [{section_name}] → {file_path.name}")
+        
+        return file_path.resolve()
+
     def write_discipline_graph(
         self, 
         discipline: str, 

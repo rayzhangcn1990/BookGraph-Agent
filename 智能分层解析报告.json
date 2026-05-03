@@ -1,0 +1,35 @@
+{
+  "timestamp": "2026-05-03T16:50:09.603644",
+  "short_books": {
+    "completed": 0,
+    "failed": 0,
+    "details": []
+  },
+  "long_books": {
+    "completed": 0,
+    "failed": 0,
+    "details": [
+      {
+        "name": "无穷的开始：世界进步的本源.epub",
+        "status": "partial",
+        "result": {
+          "output_path": "/Users/rayzhang/Documents/知识体系/📚 知识图谱/哲学/书籍图谱/无穷的开始：世界进步的本源.epub.md",
+          "successful_skills": 3,
+          "failed_skills": [
+            "case",
+            "quote"
+          ],
+          "errors": {
+            "case": [
+              "案例1 事件描述过短"
+            ],
+            "quote": [
+              "缺失字段: key_quotes",
+              "金句数量不足: 0 < 3"
+            ]
+          }
+        }
+      }
+    ]
+  }
+}

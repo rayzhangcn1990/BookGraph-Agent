@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python *)",
+      "Bash(tmux list-sessions *)",
+      "Bash(kill 37951)"
+    ]
+  }
+}
