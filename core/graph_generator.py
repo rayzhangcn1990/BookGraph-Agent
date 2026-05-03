@@ -305,8 +305,12 @@ class GraphGenerator:
                 lines.append("")
                 # 拆分为前提假设、推理链条、核心结论三行
                 logic_text = concept.underlying_logic
+                # 🔑 修复：清理开头可能存在的 "- " 前缀
+                if logic_text.startswith("- "):
+                    logic_text = logic_text[2:].strip()
                 # 解析单行格式：前提假设：xxx→推理链条：xxx→核心结论：xxx
-                m = re.match(r'前提假设：(.+?)→推理链条：(.+?)→核心结论：(.+)$', logic_text)
+                # 🔑 修复：允许箭头前后有空格
+                m = re.match(r'前提假设：(.+?)\s*→\s*推理链条：(.+?)\s*→\s*核心结论：(.+)$', logic_text)
                 if m:
                     lines.append(f"- **前提假设**：{m.group(1).strip()}")
                     lines.append(f"- **推理链条**：{m.group(2).strip()}")
@@ -367,7 +371,11 @@ class GraphGenerator:
                 lines.append("")
                 # 拆分为前提假设、推理链条、核心结论三行
                 logic_text = insight.underlying_logic
-                m = re.match(r'前提假设：(.+?)→推理链条：(.+?)→核心结论：(.+)$', logic_text)
+                # 🔑 修复：清理开头可能存在的 "- " 前缀
+                if logic_text.startswith("- "):
+                    logic_text = logic_text[2:].strip()
+                # 🔑 修复：允许箭头前后有空格
+                m = re.match(r'前提假设：(.+?)\s*→\s*推理链条：(.+?)\s*→\s*核心结论：(.+)$', logic_text)
                 if m:
                     lines.append(f"- **前提假设**：{m.group(1).strip()}")
                     lines.append(f"- **推理链条**：{m.group(2).strip()}")
