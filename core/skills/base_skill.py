@@ -44,7 +44,7 @@ class BaseSkill(ABC):
 
     def __init__(self):
         """初始化 Skill"""
-        self.retry_delays = [30, 60, 90]  # 指数退避
+        self.retry_delays = [10, 30, 60]  # 指数退避（缩短初始延迟）
         self.max_retries = 3
 
     @property
@@ -100,16 +100,20 @@ class BaseSkill(ABC):
             chunk_content=combined_content
         )
 
-        # 调用 LLM（带重试）
+        # 调用 LLM（带重试和超时）
         for retry in range(self.max_retries):
             try:
-                response = await asyncio.to_thread(
-                    llm_client._call_llm,
-                    [
-                        {"role": "system", "content": self._get_system_prompt()},
-                        {"role": "user", "content": prompt}
-                    ],
-                    max_tokens=16384
+                # 🔑 添加超时控制（最多3分钟）
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        llm_client._call_llm,
+                        [
+                            {"role": "system", "content": self._get_system_prompt()},
+                            {"role": "user", "content": prompt}
+                        ],
+                        max_tokens=16384
+                    ),
+                    timeout=180  # 3分钟超时
                 )
 
                 if response is None:
@@ -131,6 +135,12 @@ class BaseSkill(ABC):
                     delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
                     logger.warning(f"[{self.name}] 解析失败，{delay}s后重试")
                     await asyncio.sleep(delay)
+
+            except asyncio.TimeoutError:
+                logger.error(f"[{self.name}] LLM调用超时（180s）")
+                if retry < self.max_retries - 1:
+                    await asyncio.sleep(self.retry_delays[0])
+                continue
 
             except Exception as e:
                 error_str = str(e)
@@ -368,18 +378,19 @@ class BaseSkill(ABC):
         return errors
 
     def _get_cached_result(self, book_title: str) -> Optional[Dict]:
-        """获取缓存结果（禁用 - ParseCache API 不匹配）"""
-        # 🔑 ParseCache 使用 book_title + chunk_index + content_hash 作为键
-        # BaseSkill 只有 book_title，无法匹配
-        # 暂时禁用缓存，避免 AttributeError
-        return None
+        """获取缓存结果"""
+        from utils.parse_cache import get_cache
+        cache = get_cache()
+        # 使用专用缓存键
+        cache_key = f"{book_title}_{self.name}"
+        return cache.get(cache_key)
 
     def _save_cached_result(self, book_title: str, result: Dict):
-        """保存缓存结果（禁用 - ParseCache API 不匹配）"""
-        # 🔑 ParseCache 使用 book_title + chunk_index + content_hash 作为键
-        # BaseSkill 无法生成匹配的键
-        # 暂时禁用缓存
-        pass
+        """保存缓存结果"""
+        from utils.parse_cache import get_cache
+        cache = get_cache()
+        cache_key = f"{book_title}_{self.name}"
+        cache.set(cache_key, result)
 
     def _create_fallback_result(self, errors: List[str]) -> Dict:
         """创建后备结果"""

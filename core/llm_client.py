@@ -946,7 +946,7 @@ class LLMClient:
         if len(existing_graph) > 50000:
             existing_graph = existing_graph[:50000] + "...（已截断）"
         
-        prompt = DISCIPLINE_DETECTION_PROMPT, DISCIPLINE_GRAPH_UPDATE_PROMPT.format(
+        prompt = DISCIPLINE_GRAPH_UPDATE_PROMPT.format(
             existing_discipline_graph=existing_graph,
             new_book_graph=new_book_json,
             book_title=book_title,
