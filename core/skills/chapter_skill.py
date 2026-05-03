@@ -124,11 +124,40 @@ class ChapterSkill(BaseSkill):
             title = chapter.get("title", "未命名章节")
             core_arg = self._clean_content(chapter.get("core_argument", ""))
             logic = self._clean_content(chapter.get("underlying_logic", ""))
+            related_books = chapter.get("related_books", [])
+            critical_questions = chapter.get("critical_questions", [])
 
+            # 🔑 强化格式：详细表格展示
             lines.append(f"### 第{chapter_number}章：{title}")
             lines.append("")
-            lines.append("> [!abstract] 章节摘要")
-            lines.append(f"> {core_arg}")
+            lines.append("| 要素 | 内容 |")
+            lines.append("|------|------|")
+
+            # 核心论点
+            if core_arg:
+                lines.append(f"| 🎯 核心论点 | {core_arg} |")
+
+            # 底层逻辑（拆解单行格式）
+            if logic:
+                import re
+                m = re.match(r'前提假设：(.+?)\s*→\s*推理链条：(.+?)\s*→\s*核心结论：(.+)$', logic)
+                if m:
+                    lines.append(f"| 📊 前提假设 | {m.group(1).strip()} |")
+                    lines.append(f"| 🔗 推理链条 | {m.group(2).strip()} |")
+                    lines.append(f"| ✅ 核心结论 | {m.group(3).strip()} |")
+                else:
+                    lines.append(f"| 🧠 底层逻辑 | {logic} |")
+
+            # 关联书籍
+            if related_books:
+                related_str = ", ".join([f"[[{b}]]" for b in related_books])
+                lines.append(f"| 📚 关联书籍 | {related_str} |")
+
+            # 批判性问题
+            if critical_questions:
+                questions_str = "; ".join(critical_questions[:3])
+                lines.append(f"| ⚠️ 批判性问题 | {questions_str} |")
+
             lines.append("")
             lines.append("---")
             lines.append("")
