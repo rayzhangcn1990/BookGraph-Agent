@@ -299,13 +299,26 @@ async def _synthesize_results(
     ]
 
     # 智能重试（最多3次）
+    SYNTHESIS_TIMEOUT = 600  # 🔑 新增：synthesis 超时限制（10分钟）
+
     for retry in range(3):
         try:
-            response = await asyncio.to_thread(
-                llm_client._call_llm,
-                messages,
-                max_tokens=16384
-            )
+            # 🔑 新增：使用 asyncio.wait_for 包装，添加超时控制
+            try:
+                response = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        llm_client._call_llm,
+                        messages,
+                        max_tokens=16384
+                    ),
+                    timeout=SYNTHESIS_TIMEOUT
+                )
+            except asyncio.TimeoutError:
+                logger.warning(f"   ⚠️ Synthesis API 超时 ({SYNTHESIS_TIMEOUT}秒)")
+                delay = 30 * (retry + 1)
+                logger.warning(f"   ⚠️ 综合分析超时，{delay}秒后重试")
+                await asyncio.sleep(delay)
+                continue
 
             if response:
                 result, success, error_msg = parse_model_output(response, "synthesis")
