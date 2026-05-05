@@ -210,13 +210,50 @@ def _semantic_chunking(parse_result, config: Dict) -> List:
     return chunks
 
 
+def _extract_chapters_list(chunk_results: List[Dict]) -> str:
+    """
+    🔑 根因修复：从 chunk_results 中提取章节列表（JSON 格式）
+
+    Args:
+        chunk_results: chunk 分析结果列表
+
+    Returns:
+        str: JSON 格式的章节列表字符串
+    """
+    chapters = []
+
+    for result in chunk_results:
+        # 从每个 chunk 中提取 chapter_summaries
+        if 'chapter_summaries' in result and isinstance(result['chapter_summaries'], list):
+            for ch in result['chapter_summaries']:
+                if isinstance(ch, dict):
+                    # 🔑 关键：保持 JSON 格式，不转换为纯文本
+                    chapters.append({
+                        'chapter_number': ch.get('chapter_number', '?'),
+                        'title': ch.get('title', ''),
+                        'core_argument': ch.get('core_argument', ''),
+                        'underlying_logic': ch.get('underlying_logic', ''),
+                        'related_books': ch.get('related_books', []),
+                        'critical_questions': ch.get('critical_questions', [])
+                    })
+
+    # 🔑 返回 JSON 格式（而不是纯文本）
+    if chapters:
+        # 🔑 去重策略：保留所有章节（不去重，因为每个chunk可能分析不同部分）
+        # 但限制总数（避免过长）
+        max_chapters = 50  # 最多保留50个章节
+        return json.dumps(chapters[:max_chapters], ensure_ascii=False)
+    else:
+        return "[]"  # 🔑 返回空数组（而不是"未检测到"）
+
+
 async def _synthesize_results(
     chunk_results: List[Dict],
     book_title: str,
     metadata: Dict,
     discipline: str,
     config: Dict
-) -> Dict:
+) -> 'BookGraph':
     """
     综合分析所有 chunk 结果
 
@@ -228,9 +265,22 @@ async def _synthesize_results(
         config: 配置
 
     Returns:
-        Dict: 综合分析结果
+        BookGraph: 综合分析结果（返回 BookGraph 对象）
     """
+    from schemas.book_graph_schema import BookGraph
+    from core.book_graph_quality_checker import check_book_graph_quality
+
     llm_client = get_llm_client(config)
+
+    # 🔑 根因修复：从 chunk_results 中提取章节列表
+    chapters_list = _extract_chapters_list(chunk_results)
+    # 🔑 修复：正确计算章节数（解析 JSON，而不是用 split('\n')）
+    try:
+        chapters_json = json.loads(chapters_list)
+        chapter_count = len(chapters_json)
+    except json.JSONDecodeError:
+        chapter_count = 0
+    logger.info(f"   📖 提取章节: {chapter_count} 个章节摘要")
 
     # 精简输入（避免过长）
     analyses_json = json.dumps(chunk_results, ensure_ascii=False)[:30000]
@@ -238,7 +288,7 @@ async def _synthesize_results(
     prompt = SYNTHESIS_PROMPT.format(
         book_title=book_title,
         author=metadata.get('author', 'Unknown'),
-        chapters_list="",  # 简化
+        chapters_list=chapters_list,  # 🔑 修复：传递章节列表（不再硬编码空字符串）
         all_chunk_analyses=analyses_json,
     )
 
@@ -258,8 +308,29 @@ async def _synthesize_results(
 
             if response:
                 result, success, _ = parse_model_output(response, "synthesis")
-                if success:
-                    return result
+                if success and result:
+                    # 🔑 关键修复：先规范化数据，填充所有必填字段的默认值
+                    result = llm_client._normalize_book_graph_data(result, metadata)
+
+                    # 🔑 质量检查（新增）
+                    passed, quality_report = check_book_graph_quality(result)
+
+                    if not passed:
+                        logger.warning(f"   ⚠️ 内容质量不合格:\n{quality_report[:500]}")
+                        # 质量不合格也触发重试
+                        delay = 30 * (retry + 1)
+                        logger.warning(f"   ⚠️ 综合分析质量不合格，{delay}秒后重试")
+                        await asyncio.sleep(delay)
+                        continue
+
+                    # 🔑 将 Dict 转换为 BookGraph 对象
+                    try:
+                        book_graph = BookGraph(**result)
+                        logger.info(f"   ✅ 质量检查通过（评分: {quality_report.split('质量评分')[1].split('/')[0].strip()}分）")
+                        return book_graph
+                    except Exception as e:
+                        logger.warning(f"   ⚠️ BookGraph 构建失败: {e}")
+                        # 继续重试
 
             # 失败等待后重试
             delay = 30 * (retry + 1)
