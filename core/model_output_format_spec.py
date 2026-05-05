@@ -128,9 +128,9 @@ FIELD_NAME_MAPPING_EXTENDED = {
 # ═══════════════════════════════════════════════════════════
 
 REQUIRED_FIELDS = {
-    # chunk 分析必要字段（至少包含一项）
+    # chunk 分析必要字段（chapter_summaries 必须存在！）
     "chunk_analysis": [
-        "chapter_summaries",
+        "chapter_summaries",  # 🔑 强制要求！必须存在（即使是空数组）
         "core_concepts",
         "key_insights",
         "golden_quotes",
@@ -142,6 +142,12 @@ REQUIRED_FIELDS = {
         "chapters",
         "core_concepts",
     ],
+}
+
+# 🔑 新增：强制字段（必须存在，不能缺失）
+MANDATORY_FIELDS = {
+    "chunk_analysis": ["chapter_summaries"],  # 每个chunk必须输出章节信息
+    "synthesis": ["metadata", "chapters", "core_concepts"],
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -223,7 +229,9 @@ def normalize_field_names(result: dict) -> dict:
 
 def validate_required_fields(result: dict, field_type: str = "chunk_analysis") -> tuple:
     """
-    验证必要字段是否存在
+    验证必要字段是否存在（强化版）
+
+    🔑 根因修复：强制要求 chapter_summaries 存在且非空
 
     Args:
         result: 解析结果
@@ -233,13 +241,35 @@ def validate_required_fields(result: dict, field_type: str = "chunk_analysis") -
         tuple: (是否合格, 缺失字段列表)
     """
     required = REQUIRED_FIELDS.get(field_type, [])
+    mandatory = MANDATORY_FIELDS.get(field_type, [])
 
-    # 🔑 检查是否至少有一个必要字段有内容
+    # 🔑 Step 1: 检查强制字段（必须存在且非空）
+    mandatory_missing = []
+    mandatory_empty = []
+    for field in mandatory:
+        if field not in result:
+            mandatory_missing.append(field)
+        else:
+            # 🔑 新增：检查强制字段是否非空（至少有1个元素）
+            value = result[field]
+            if isinstance(value, list) and len(value) == 0:
+                mandatory_empty.append(field)
+            elif isinstance(value, dict) and len(value) == 0:
+                mandatory_empty.append(field)
+            elif isinstance(value, str) and len(value.strip()) == 0:
+                mandatory_empty.append(field)
+
+    if mandatory_missing:
+        # 强制字段缺失，直接不合格
+        return False, mandatory_missing
+
+    if mandatory_empty:
+        # 🔑 新增：强制字段为空，直接不合格
+        return False, [f"{f}(空)" for f in mandatory_empty]
+
+    # 🔑 Step 2: 检查至少有一个必要字段有内容
     has_content = False
     missing = []
-
-    # 特殊情况：所有字段都存在但都是空（如"致谢"章节）
-    all_fields_empty = True
 
     for field in required:
         if field in result:
@@ -247,23 +277,19 @@ def validate_required_fields(result: dict, field_type: str = "chunk_analysis") -
             # 检查是否有内容
             if isinstance(value, list) and len(value) > 0:
                 has_content = True
-                all_fields_empty = False
             elif isinstance(value, dict) and len(value) > 0:
                 has_content = True
-                all_fields_empty = False
             elif isinstance(value, str) and len(value.strip()) > 0:
                 has_content = True
-                all_fields_empty = False
         else:
             missing.append(field)
-            all_fields_empty = False
 
-    # 🔑 新逻辑：如果所有字段都存在但都是空，标记为"无学术内容"但仍视为合格
-    if all_fields_empty and not missing:
-        # 标记为无学术内容章节，但不阻塞流程
+    # 🔑 Step 3: 允许空内容（如"致谢"章节），但必须有字段
+    if not has_content and not missing:
+        # 标记为无学术内容章节，但仍视为合格（因为强制字段已存在）
         result["is_non_academic"] = True
         result["extraction_status"] = "empty_content"
-        return True, []  # 视为合格，允许继续
+        return True, []
 
     return has_content, missing
 
