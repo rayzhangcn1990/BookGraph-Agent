@@ -306,14 +306,14 @@ def repair_truncated_json(json_str: str) -> str:
     """
     import re
 
-    # 1. 如果 JSON 以 } 结尾，可能是完整的
-    if json_str.rstrip().endswith('}'):
-        return json_str
-
-    # 2. 移除可能的 Markdown 代码块标记
+    # 🔑 Step 0: 先移除 Markdown 代码块标记（无论是否完整）
     json_str = re.sub(r'^```json\s*', '', json_str)
     json_str = re.sub(r'^```\s*', '', json_str)
     json_str = re.sub(r'\s*```$', '', json_str)
+
+    # 1. 如果 JSON 以 } 结尾，可能是完整的
+    if json_str.rstrip().endswith('}'):
+        return json_str
 
     # 3. 找到最外层 JSON 对象的开始
     start = json_str.find('{')

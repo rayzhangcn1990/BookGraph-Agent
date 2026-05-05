@@ -289,6 +289,7 @@ async def _synthesize_results(
         book_title=book_title,
         author=metadata.get('author', 'Unknown'),
         chapters_list=chapters_list,  # 🔑 修复：传递章节列表（不再硬编码空字符串）
+        chapters_count=chapter_count,  # 🔑 新增：章节数量，强化指令
         all_chunk_analyses=analyses_json,
     )
 
@@ -307,7 +308,20 @@ async def _synthesize_results(
             )
 
             if response:
-                result, success, _ = parse_model_output(response, "synthesis")
+                result, success, error_msg = parse_model_output(response, "synthesis")
+
+                # 🔑 新增：诊断日志 - 记录解析失败时的原始响应
+                if not success:
+                    logger.warning(f"   ⚠️ Synthesis 解析失败: {error_msg}")
+                    logger.warning(f"   ⚠️ 原始响应（前500字符）: {response[:500]}")
+                    # 保存完整响应到临时文件
+                    debug_path = Path(f"/tmp/synthesis_failed_{retry+1}.txt")
+                    with open(debug_path, 'w') as f:
+                        f.write(f"# Retry {retry+1}\n")
+                        f.write(f"# Error: {error_msg}\n\n")
+                        f.write(response)
+                    logger.warning(f"   ⚠️ 完整响应已保存到: {debug_path}")
+
                 if success and result:
                     # 🔑 关键修复：先规范化数据，填充所有必填字段的默认值
                     result = llm_client._normalize_book_graph_data(result, metadata)
