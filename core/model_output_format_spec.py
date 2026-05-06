@@ -58,14 +58,14 @@ OUTPUT_FORMAT_CONSTRAINT = """
 
 # 完整字段名映射表（扩展版）
 FIELD_NAME_MAPPING_EXTENDED = {
-    # 章节摘要
+    # 章节摘要（chunk分析阶段）
     "章节摘要": "chapter_summaries",
     "章节概要": "chapter_summaries",
     "章节分析": "chapter_summaries",
     "章节内容": "chapter_summaries",
     "chapter_summary": "chapter_summaries",
     "chapter_summaries": "chapter_summaries",
-    "chapters": "chapter_summaries",
+    # 🔑 注意：不映射 "chapters" → "chapter_summaries"，因为 synthesis 输出中 chapters 是独立字段
     "summaries": "chapter_summaries",
 
     # 核心概念
@@ -375,13 +375,14 @@ def repair_truncated_json(json_str: str) -> str:
     return result
 
 
-def parse_model_output(content: str, model_id: str = "unknown") -> tuple:
+def parse_model_output(content: str, field_type: str = "chunk_analysis", model_id: str = "unknown") -> tuple:
     """
     解析模型输出（三层防护）
 
     Args:
         content: 模型返回的原始内容
-        model_id: 模型标识符
+        field_type: 字段类型（chunk_analysis 或 synthesis），用于验证
+        model_id: 模型标识符（可选）
 
     Returns:
         tuple: (解析结果dict, 是否成功, 错误信息)
@@ -454,8 +455,8 @@ def parse_model_output(content: str, model_id: str = "unknown") -> tuple:
     # Step 4: 规范化字段名
     result = normalize_field_names(result)
 
-    # Step 5: 验证必要字段
-    is_valid, missing = validate_required_fields(result)
+    # Step 5: 验证必要字段（使用正确的 field_type）
+    is_valid, missing = validate_required_fields(result, field_type)
     if not is_valid:
         return result, False, f"缺少必要字段: {missing}"
 

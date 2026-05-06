@@ -321,7 +321,8 @@ async def _synthesize_results(
                 continue
 
             if response:
-                result, success, error_msg = parse_model_output(response, "synthesis")
+                # 🔑 修复：使用 field_type 参数指定 synthesis 类型
+                result, success, error_msg = parse_model_output(response, field_type="synthesis")
 
                 # 🔑 新增：诊断日志 - 记录解析失败时的原始响应
                 if not success:
