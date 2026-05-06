@@ -3,9 +3,9 @@
 # ═══════════════════════════════════════
 
 obsidian:
-  vault_path: "/Users/rayzhang/Documents/知识体系"
+  vault_path: "${OBSIDIAN_VAULT_PATH}"
   graph_root: "📚 知识图谱"
-  
+
   # 一级学科路径映射
   discipline_paths:
     政治学: "📚 知识图谱/政治学"
@@ -21,7 +21,6 @@ obsidian:
     思维: "📚 知识图谱/思维"
 
   # 二级子学科配置（可选，用于更细分分类）
-  # 书籍默认存放在一级学科目录，如需单独建立子学科目录可在此配置
   sub_discipline_paths: {}
 
   # 子目录结构
@@ -32,68 +31,69 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  provider: "anthropic"
-  model: "nvidia/llama-3.3-nemotron-super-49b-v1"  # NVIDIA NIM正常
-  api_base: "http://localhost:18765"
-  api_key: "unused"
+  provider: "nvidia-nim"
+  model: "nvidia/llama-3.3-nemotron-super-49b-v1"
+  api_base: "${NVIDIA_NIM_API_BASE}"
+  api_key: "${NVIDIA_NIM_API_KEY}"
   max_tokens: 16384
   temperature: 0.3
   chunk_size: 25000
   merge_threshold: 15000
   max_retries: 5
   retry_delay: 10
-  timeout: 240           # 🔑 综合分析超时（从900降到240秒，提升响应速度）
+  timeout: 240
 
-  # 🔑 多API源配置（额度独立，自动切换）
-  # 🔑 2026-05-03 13:18更新：NVIDIA NIM恢复正常，优先使用
+  # 模型池配置
+  model_pool:
+    enabled: true
+    auto_verify: true
+    verify_interval: 3600
+    min_stability: 0.7
+    max_response_time: 30
+    min_success_count: 3
+    max_consecutive_failures: 3
+
+  # NVIDIA NIM API 可用模型
+  available_models:
+    - model: "nvidia/llama-3.3-nemotron-super-49b-v1"
+      api_base: "${NVIDIA_NIM_API_BASE}"
+      api_key: "${NVIDIA_NIM_API_KEY}"
+      priority: 1
+    - model: "meta/llama-3.1-405b-instruct"
+      api_base: "${NVIDIA_NIM_API_BASE}"
+      api_key: "${NVIDIA_NIM_API_KEY}"
+      priority: 2
+    - model: "qwen/qwen3-coder-480b-a35b-instruct"
+      api_base: "${NVIDIA_NIM_API_BASE}"
+      api_key: "${NVIDIA_NIM_API_KEY}"
+      priority: 3
+
   api_sources:
-    # 🏆 第一优先：NVIDIA NIM（刚刚验证可用）
+    # 首选：NVIDIA NIM API
     - name: "nvidia-nim-direct"
-      api_base: "https://integrate.api.nvidia.com/v1"
+      api_base: "${NVIDIA_NIM_API_BASE}"
       api_key: "${NVIDIA_NIM_API_KEY}"
       priority: 1
       quota_type: "independent"
       preferred_models:
         - "nvidia/llama-3.3-nemotron-super-49b-v1"
         - "meta/llama-3.1-405b-instruct"
+        - "qwen/qwen3-coder-480b-a35b-instruct"
 
-    # 第二优先：OpenRouter（当前429限流）
-    - name: "openrouter-direct"
-      api_base: "https://openrouter.ai/api/v1"
-      api_key: "${OPENROUTER_API_KEY}"
-      priority: 2
-      quota_type: "shared"
-      preferred_models:
-        - "nousresearch/hermes-3-llama-3.1-405b:free"
-        - "openai/gpt-oss-120b:free"
-      # ❌ 已排除: minimax/minimax-m2.5:free (成功率50%)
-      # ❌ 已排除: openrouter/free (成功率0%)
-
-    # 备用：本地代理（可能不稳定）
-    - name: "nvidia-nim"
-      api_base: "http://localhost:18765/v1"
-      api_key: "unused"
-      priority: 1
-      quota_type: "shared"
-      preferred_models:
-        - "qwen/qwen3-coder-480b-a35b-instruct"  # 强推理模型
-        - "moonshotai/kimi-k2-instruct"          # Moonshot Kimi
-        - "meta/llama-3.1-70b-instruct"          # Llama 3.1 70B
-        - "nvidia/llama-3.3-nemotron-super-49b-v1"
-
-    - name: "openrelay"
+    # 备用：本地代理
+    - name: "nvidia-nim-local"
       api_base: "http://localhost:18765/v1"
       api_key: "unused"
       priority: 2
       quota_type: "shared"
 
+    # OpenRouter（独立额度）
     - name: "openrouter"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_API_KEY}"
       priority: 3
       quota_type: "independent"
 
-    # 🔑 独立额度轮换（优先级 2，当 shared 额度打爆时自动切换）
     - name: "openrouter-gemini"
       api_base: "https://openrouter.ai/api/v1"
       api_key: "${OPENROUTER_GEMINI_API_KEY}"
@@ -131,7 +131,7 @@ llm:
         - "nousresearch/hermes-3-llama-3.1-405b:free"
 
 batch:
-  max_workers: 4         # 🔑 并发数（从1改成4，硬件自适应并行处理）
+  max_workers: 4
 
 logging:
   level: "INFO"
@@ -139,10 +139,10 @@ logging:
   max_size_mb: 10
 
 ocr:
-  engine: "paddleocr"      # marker / paddleocr / tesseract
+  engine: "paddleocr"
   language: "ch"
   dpi: 300
-  timeout: 300             # 🔑 OCR超时（从900降到300秒）
+  timeout: 300
 
 parsing:
   supported_formats:
