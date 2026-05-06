@@ -306,10 +306,17 @@ def repair_truncated_json(json_str: str) -> str:
     """
     import re
 
-    # 🔑 Step 0: 先移除 Markdown 代码块标记（无论是否完整）
+    # 🔑 Step 0: 先 strip() 去除首尾空白，再移除 Markdown 代码块标记
+    json_str = json_str.strip()
     json_str = re.sub(r'^```json\s*', '', json_str)
     json_str = re.sub(r'^```\s*', '', json_str)
     json_str = re.sub(r'\s*```$', '', json_str)
+
+    # 🔑 新增 Step 0.5: 移除 JSON 注释（LLM经常添加 // 注释）
+    # 移除单行注释 // ...（但不移除URL中的//，如 https://）
+    json_str = re.sub(r'(?<!:)//[^\n]*', '', json_str)
+    # 移除多行注释 /* ... */
+    json_str = re.sub(r'/\*[\s\S]*?\*/', '', json_str)
 
     # 1. 如果 JSON 以 } 结尾，可能是完整的
     if json_str.rstrip().endswith('}'):
@@ -389,8 +396,8 @@ def parse_model_output(content: str, model_id: str = "unknown") -> tuple:
             "error": "LLM 返回空内容"
         }, False, "LLM 返回空内容，已记录"
 
-    # Step 1: 清理内容
-    content = content.strip()
+    # Step 1: 清理内容 - 🔑 关键修复：先清理 markdown 和注释
+    content = repair_truncated_json(content.strip())
 
     # Step 2: 提取 JSON
     try:
@@ -426,19 +433,14 @@ def parse_model_output(content: str, model_id: str = "unknown") -> tuple:
             # 尝试解析
             try:
                 result = json.loads(json_str)
-            except json.JSONDecodeError:
-                # Step 3: 修复截断
-                repaired = repair_truncated_json(content)
-                try:
-                    result = json.loads(repaired)
-                except json.JSONDecodeError as e:
-                    # 🔑 Fallback: 保存raw_response，不丢弃！
-                    logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
-                    return {
-                        "raw_response": content[:5000],  # 保存前5000字符
-                        "extraction_status": "partial",
-                        "error": str(e)[:100]
-                    }, False, f"JSON 解析失败，已保存raw_response"
+            except json.JSONDecodeError as e:
+                # 🔑 Fallback: 保存raw_response，不丢弃！
+                logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
+                return {
+                    "raw_response": content[:5000],  # 保存前5000字符
+                    "extraction_status": "partial",
+                    "error": str(e)[:100]
+                }, False, f"JSON 解析失败，已保存raw_response"
 
     except Exception as e:
         # 🔑 Fallback: 异常时也保存raw_response
