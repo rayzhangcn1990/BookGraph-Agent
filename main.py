@@ -126,12 +126,17 @@ async def process_single_book_optimized(
         logger.info(f"   ✅ Chunk 分析完成: {len(chunk_results)} 个成功")
 
         # Step 4: 综合分析
+        # 🔑 新增：获取预期章节数（用于质量校验，防止LLM偷懒）
+        expected_chapters = len(parse_result.chapters) if parse_result.chapters else 0
+        logger.info(f"   📖 预期章节数: {expected_chapters}")
+
         synthesis = await _synthesize_results(
             chunk_results,
             book_title,
             parse_result.metadata,
             discipline,
-            config
+            config,
+            expected_chapters  # 🔑 新增参数
         )
 
         logger.info(f"   ✅ 综合分析完成")
@@ -252,7 +257,8 @@ async def _synthesize_results(
     book_title: str,
     metadata: Dict,
     discipline: str,
-    config: Dict
+    config: Dict,
+    expected_chapters: int = 0  # 🔑 新增：预期章节数
 ) -> 'BookGraph':
     """
     综合分析所有 chunk 结果
@@ -263,6 +269,7 @@ async def _synthesize_results(
         metadata: 书籍元数据
         discipline: 学科
         config: 配置
+        expected_chapters: 预期章节数（用于质量校验，防止LLM偷懒合并章节）
 
     Returns:
         BookGraph: 综合分析结果（返回 BookGraph 对象）
@@ -281,6 +288,14 @@ async def _synthesize_results(
     except json.JSONDecodeError:
         chapter_count = 0
     logger.info(f"   📖 提取章节: {chapter_count} 个章节摘要")
+
+    # 🔑 新增：章节覆盖率预警
+    if expected_chapters > 0:
+        coverage = chapter_count / expected_chapters
+        if coverage < 0.8:
+            logger.warning(f"   ⚠️ 章节覆盖率低: {chapter_count}/{expected_chapters} ({coverage*100:.0f}%)")
+        else:
+            logger.info(f"   ✅ 章节覆盖率: {coverage*100:.0f}%")
 
     # 精简输入（避免过长）- 🔑 修复：缩减到15KB，加速synthesis响应
     analyses_json = json.dumps(chunk_results, ensure_ascii=False)[:15000]
@@ -340,8 +355,8 @@ async def _synthesize_results(
                     # 🔑 关键修复：先规范化数据，填充所有必填字段的默认值
                     result = llm_client._normalize_book_graph_data(result, metadata)
 
-                    # 🔑 质量检查（新增）
-                    passed, quality_report = check_book_graph_quality(result)
+                    # 🔑 质量检查（强化版：传入预期章节数）
+                    passed, quality_report = check_book_graph_quality(result, expected_chapters)
 
                     if not passed:
                         logger.warning(f"   ⚠️ 内容质量不合格:\n{quality_report[:500]}")
