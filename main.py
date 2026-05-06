@@ -282,8 +282,8 @@ async def _synthesize_results(
         chapter_count = 0
     logger.info(f"   📖 提取章节: {chapter_count} 个章节摘要")
 
-    # 精简输入（避免过长）
-    analyses_json = json.dumps(chunk_results, ensure_ascii=False)[:30000]
+    # 精简输入（避免过长）- 🔑 修复：缩减到15KB，加速synthesis响应
+    analyses_json = json.dumps(chunk_results, ensure_ascii=False)[:15000]
 
     prompt = SYNTHESIS_PROMPT.format(
         book_title=book_title,
@@ -299,7 +299,7 @@ async def _synthesize_results(
     ]
 
     # 智能重试（最多3次）
-    SYNTHESIS_TIMEOUT = 600  # 🔑 新增：synthesis 超时限制（10分钟）
+    SYNTHESIS_TIMEOUT = 1200  # 🔑 修复：synthesis 超时限制（20分钟，适应大模型响应）
 
     for retry in range(3):
         try:
