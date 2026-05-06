@@ -318,6 +318,15 @@ def repair_truncated_json(json_str: str) -> str:
     # 移除多行注释 /* ... */
     json_str = re.sub(r'/\*[\s\S]*?\*/', '', json_str)
 
+    # 🔑 新增 Step 0.6: 清理注释移除后的空白行和多余逗号
+    # 移除只包含空白的行（保留有内容的行）
+    lines = json_str.split('\n')
+    non_empty_lines = [line for line in lines if line.strip()]
+    json_str = '\n'.join(non_empty_lines)
+
+    # 🔑 清理多余的逗号（逗号后面是 ] 或 }）
+    json_str = re.sub(r',(\s*[\]\}])', r'\1', json_str)
+
     # 1. 如果 JSON 以 } 结尾，可能是完整的
     if json_str.rstrip().endswith('}'):
         return json_str
