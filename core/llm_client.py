@@ -47,9 +47,69 @@ except ImportError:
 
 from schemas.book_graph_schema import BookGraph, DisciplineType
 from core.multi_source_manager import MultiSourceAPIManager, create_client_from_source
+from core.model_pool_manager import ModelPoolManager
+import re
+
+
+def resolve_env_vars(value: str) -> str:
+    """
+    解析环境变量引用（${VAR_NAME} 格式）
+
+    Args:
+        value: 可能包含环境变量引用的字符串
+
+    Returns:
+        str: 解析后的字符串（环境变量已替换）
+    """
+    if not isinstance(value, str):
+        return value
+
+    # 匹配 ${VAR_NAME} 格式
+    pattern = r'\$\{([^}]+)\}'
+
+    def replace_env_var(match):
+        var_name = match.group(1)
+        env_value = os.environ.get(var_name, '')
+        if not env_value:
+            logger.warning(f"⚠️ 环境变量 {var_name} 未设置，使用空值")
+        return env_value
+
+    return re.sub(pattern, replace_env_var, value)
+
+
+def resolve_config_env_vars(config: Dict) -> Dict:
+    """
+    递归解析配置中的所有环境变量引用
+
+    Args:
+        config: 配置字典
+
+    Returns:
+        Dict: 解析后的配置字典
+    """
+    if not isinstance(config, dict):
+        return config
+
+    resolved = {}
+    for key, value in config.items():
+        if isinstance(value, dict):
+            resolved[key] = resolve_config_env_vars(value)
+        elif isinstance(value, list):
+            resolved[key] = [
+                resolve_config_env_vars(item) if isinstance(item, dict)
+                else resolve_env_vars(item) if isinstance(item, str)
+                else item
+                for item in value
+            ]
+        elif isinstance(value, str):
+            resolved[key] = resolve_env_vars(value)
+        else:
+            resolved[key] = value
+
+    return resolved
 from core.prompts import (
     SYSTEM_PROMPT, CHUNK_ANALYSIS_PROMPT, SYNTHESIS_PROMPT, BATCH_CHUNK_ANALYSIS_PROMPT,
-    
+
     DISCIPLINE_DETECTION_PROMPT, DISCIPLINE_GRAPH_UPDATE_PROMPT
 )
 
@@ -78,7 +138,8 @@ class LLMClient:
                 - chunk_size: 分块大小
                 - max_retries: 最大重试次数
         """
-        self.config = config or {}
+        # 🔑 解析环境变量引用（${VAR_NAME} 格式）
+        self.config = resolve_config_env_vars(config) if config else {}
         self.provider = self.config.get('provider', 'anthropic')
         self.model = self.config.get('model', 'claude-3-5-sonnet-20241022')
         self.max_tokens = self.config.get('max_tokens', 32768)
@@ -94,6 +155,9 @@ class LLMClient:
 
         # 🔑 多API源管理器
         self.multi_source_manager: Optional[MultiSourceAPIManager] = None
+
+        # 🔑 模型池管理器（新增）
+        self.model_pool_manager: Optional[ModelPoolManager] = None
 
         # 初始化客户端
         self._init_client()
@@ -116,6 +180,10 @@ class LLMClient:
         # 🔑 初始化多API源管理器
         if self.config.get('api_sources'):
             self.multi_source_manager = MultiSourceAPIManager(self.config)
+
+            # 🔑 初始化模型池管理器（新增）
+            self.model_pool_manager = ModelPoolManager(self.config)
+
             source = self.multi_source_manager.get_current_source()
             if source:
                 self.api_base = source.api_base
@@ -130,7 +198,8 @@ class LLMClient:
                         print(f"✅ 多源API初始化成功（源：{source.name}）")
                         print(f"   API Base: {source.api_base}")
 
-                        self._setup_model_rotation()
+                        # 🔑 使用模型池管理器选择模型（替换旧逻辑）
+                        self._select_model_from_pool()
                         return
 
         # 从配置读取 API 信息（单源模式）
@@ -216,37 +285,46 @@ class LLMClient:
         """自动选择最佳可用模型"""
         import asyncio
 
-        # 如果配置指定了模型，先尝试使用
+        # 🔑 优先使用配置指定的模型（已验证可用）
         config_model = self.config.get('model', '')
+        available_models = self.config.get('available_models', [])
 
-        # 自动模型选择逻辑（优先推理能力强）
-        # 🔑 更新：基于完整测试的52个可用模型，优先最强推理模型
+        # 🧪 调试：打印配置读取
+        print(f"[DEBUG] config_model: {config_model}")
+        print(f"[DEBUG] available_models: {len(available_models)} items")
+
+        # 如果配置有验证可用模型池，优先使用
+        if available_models:
+            # 使用验证可用的第一个模型
+            first_available = available_models[0]
+            self.model = first_available.get('model', config_model)
+            print(f"🎯 使用验证可用模型: {self.model}")
+            return
+
+        # 如果配置明确指定了模型，直接使用
+        if config_model and 'nemotron' in config_model or 'nvidia' in config_model:
+            self.model = config_model
+            logger.info(f"🎯 使用配置模型: {self.model}")
+            return
+
+        # 自动模型选择逻辑（仅在未配置时使用）
         preferred_models = [
-            # ⭐ TOP级推理模型（知识图谱首选）
-            "qwen/qwen3-coder-480b-a35b-instruct",   # 480B参数，最强推理
-            "meta/llama-3.1-405b-instruct",          # Llama最大405B
-            "mistralai/mistral-large-3-675b-instruct-2512", # Mistral最强675B
-            "qwen/qwen3.5-397b-a17b",                # Qwen 3.5 397B
-            "moonshotai/kimi-k2-instruct",           # Moonshot Kimi K2
+            # 🔑 验证可用模型优先
+            "nvidia/llama-3.3-nemotron-super-49b-v1",  # 验证可用（0.68s）
+            "tencent/hy3-preview:free",                # 验证可用（2.66s）
 
-            # ⭐ 强推理模型（70B+级别）
-            "openai/gpt-oss-120b",                   # OpenAI OSS 120B
-            "meta/llama-3.1-70b-instruct",           # Llama 3.1 70B
-            "meta/llama-3.3-70b-instruct",           # Llama 3.3 70B
-            "nvidia/llama-3.3-nemotron-super-49b-v1",# Nemotron Super 49B
-            "deepseek-ai/deepseek-v4-pro",           # DeepSeek V4 Pro
+            # ⭐ TOP级推理模型
+            "qwen/qwen3-coder-480b-a35b-instruct",
+            "meta/llama-3.1-405b-instruct",
+            "mistralai/mistral-large-3-675b-instruct-2512",
+            "qwen/qwen3.5-397b-a17b",
+            "moonshotai/kimi-k2-instruct",
 
-            # ⭐ 备选模型
-            "meta/llama-3.2-90b-vision-instruct",
-            "qwen/qwen3-next-80b-a3b-instruct",
-            "moonshotai/kimi-k2-thinking",
-            "nvidia/nemotron-3-super-120b-a12b",
-
-            # 原有模型（可能受限）
-            "claude-opus-4.7",
-            "claude-sonnet-4.6",
-            "claude-sonnet-4-6",
-            "gpt-4o-mini",
+            # ⭐ 强推理模型
+            "openai/gpt-oss-120b",
+            "meta/llama-3.1-70b-instruct",
+            "meta/llama-3.3-70b-instruct",
+            "deepseek-ai/deepseek-v4-pro",
         ]
 
         # 检查配置的模型是否在首选列表中
@@ -285,17 +363,60 @@ class LLMClient:
         except Exception as e:
             logger.warning(f"获取模型列表失败: {e}")
 
-        # 最终后备（使用验证可用的模型）
-        self.model = config_model or "qwen/qwen3-coder-480b-a35b-instruct"
+        # 最终后备
+        self.model = config_model or "nvidia/llama-3.3-nemotron-super-49b-v1"
 
-        # 🔑 初始化模型轮换列表（确保总有可用模型）
-        self._setup_model_rotation()
+    def _select_model_from_pool(self):
+        """
+        从模型池选择模型（使用 ModelPoolManager）
+
+        替换旧的 _auto_select_model 和 _setup_model_rotation
+        """
+        if not self.model_pool_manager:
+            # 后备：使用旧逻辑
+            self._auto_select_model()
+            self._setup_model_rotation()
+            return
+
+        # 🔑 从池管理器获取可用模型配置
+        pool_models_config = self.model_pool_manager.get_available_models_config()
+
+        if pool_models_config:
+            # 使用池中第一个模型
+            best_model = pool_models_config[0]
+            self.model = best_model['model']
+            self.api_base = best_model['api_base']
+
+            # 🔑 设置轮换列表（从池配置）
+            self.model_rotation_list = [m['model'] for m in pool_models_config]
+            self.current_model_index = 0
+
+            logger.info(f"🎯 从模型池选择: {self.model}")
+            logger.info(f"   稳定性: {best_model.get('stability', 0):.2f}")
+            logger.info(f"   响应时间: {best_model.get('response_time', 0):.2f}s")
+            logger.info(f"   轮换列表: {len(self.model_rotation_list)} 个模型")
+
+            # 🔑 更新配置中的 available_models（持久化）
+            self.config['available_models'] = pool_models_config
+
+        else:
+            # 池为空，使用旧逻辑
+            logger.warning("⚠️ 模型池为空，使用传统模型选择")
+            self._auto_select_model()
+            self._setup_model_rotation()
 
     def _setup_model_rotation(self):
         """设置模型轮换列表，确保总有可用模型"""
-        # 🔑 更新：基于完整测试的52个可用模型优先级排序
-        model_priority = [
-            # ⭐ TOP级推理模型（首选）
+        # 🔑 保留已选择的模型（不覆盖）
+        selected_model = self.model
+
+        # 🔑 验证可用模型优先（从配置读取）
+        available_models_config = self.config.get('available_models', [])
+        config_priority = [m.get('model') for m in available_models_config if m.get('model')]
+
+        # 其他模型优先级
+        model_priority = config_priority + [
+            # ⭐ TOP级推理模型
             "qwen/qwen3-coder-480b-a35b-instruct",
             "meta/llama-3.1-405b-instruct",
             "mistralai/mistral-large-3-675b-instruct-2512",
@@ -306,7 +427,6 @@ class LLMClient:
             "openai/gpt-oss-120b",
             "meta/llama-3.1-70b-instruct",
             "meta/llama-3.3-70b-instruct",
-            "nvidia/llama-3.3-nemotron-super-49b-v1",
             "deepseek-ai/deepseek-v4-pro",
 
             # ⭐ 备选模型
@@ -318,7 +438,7 @@ class LLMClient:
 
             # ⭐ 免费模型
             "openai/gpt-oss-120b:free",
-            "openrouter/free",
+            "tencent/hy3-preview:free",
             "minimax/minimax-m2.5:free",
         ]
 
@@ -359,10 +479,16 @@ class LLMClient:
                 if self.model_rotation_list:
                     logger.info(f"   首选: {self.model_rotation_list[:5]}")
 
-                # 设置当前模型
-                if self.model_rotation_list:
+                # 🔑 只有当模型未设置时才使用轮换列表第一个
+                if self.model_rotation_list and not selected_model:
                     self.current_model_index = 0
                     self.model = self.model_rotation_list[0]
+                elif selected_model:
+                    # 保留已选择的模型，确保它在轮换列表中
+                    if selected_model not in self.model_rotation_list:
+                        self.model_rotation_list.insert(0, selected_model)
+                    self.current_model_index = self.model_rotation_list.index(selected_model)
+                    logger.info(f"🎯 保留已选择模型: {self.model}")
 
         except Exception as e:
             logger.warning(f"获取模型列表失败，使用默认列表: {e}")
@@ -465,16 +591,35 @@ class LLMClient:
                 # 🔑 使用 OpenAI 客户端
                 if self.openai_client and current_model != "hermes-local":
                     try:
+                        import time
+                        call_start = time.time()
+
                         response = self.openai_client.chat.completions.create(
                             model=current_model,
                             messages=messages,
                             max_tokens=max_tokens,
                             temperature=self.temperature
                         )
+
+                        # 🔑 计算响应时间
+                        elapsed = time.time() - call_start
+
+                        # 🔑 反馈给模型池管理器（成功）
+                        if self.model_pool_manager:
+                            self.model_pool_manager.record_request_result(
+                                current_model, success=True, response_time=elapsed
+                            )
+
                         return response.choices[0].message.content
 
                     except Exception as e:
                         error_str = str(e)
+
+                        # 🔑 反馈给模型池管理器（失败）
+                        if self.model_pool_manager:
+                            self.model_pool_manager.record_request_result(
+                                current_model, success=False
+                            )
 
                         # 🔑 检测额度耗尽
                         if self._is_quota_exhausted(error_str):
@@ -732,37 +877,102 @@ class LLMClient:
     def _normalize_book_graph_data(self, data: Dict, metadata: Dict) -> Dict:
         """
         规范化 BookGraph 数据，处理 LLM 返回的不规范格式
-        
+
+        🔑 核心修复：填充所有必填字段的默认值，防止 ValidationError
+
         Args:
             data: LLM 返回的原始数据
             metadata: 书籍元数据
-            
+
         Returns:
             Dict: 规范化后的数据
         """
+        # ═══════════════════════════════════════════════════════════
+        # 🔑 Step 1: 确保顶层结构存在
+        # ═══════════════════════════════════════════════════════════
+
+        if not data:
+            data = {}
+
+        # 确保 metadata 存在且填充必填字段
+        if 'metadata' not in data:
+            data['metadata'] = {}
+
+        meta = data['metadata']
+
+        # 🔑 必填字段默认值填充
+        meta.setdefault('title', metadata.get('title', 'Unknown'))
+        meta.setdefault('author', metadata.get('author', 'Unknown'))
+        meta.setdefault('author_intro', metadata.get('author_intro', '作者简介待补充'))
+        meta.setdefault('discipline', metadata.get('discipline', '哲学'))
+
         # 处理 metadata 中的 tuple
-        if 'metadata' in data:
-            meta = data['metadata']
-            if isinstance(meta.get('title'), (tuple, list)):
-                meta['title'] = str(meta['title'][0]) if meta['title'] else ''
-            if isinstance(meta.get('author'), (tuple, list)):
-                meta['author'] = str(meta['author'][0]) if meta['author'] else ''
-        
+        if isinstance(meta.get('title'), (tuple, list)):
+            meta['title'] = str(meta['title'][0]) if meta['title'] else 'Unknown'
+        if isinstance(meta.get('author'), (tuple, list)):
+            meta['author'] = str(meta['author'][0]) if meta['author'] else 'Unknown'
+
+        # 确保 time_background 存在且填充必填字段
+        if 'time_background' not in data:
+            data['time_background'] = {}
+
+        tb = data['time_background']
+        tb.setdefault('macro_background', '宏观背景待补充')
+        tb.setdefault('micro_background', '微观背景待补充')
+        tb.setdefault('core_contradiction', '核心矛盾待补充')
+
+        # 确保 critical_analysis 存在且填充必填字段
+        if 'critical_analysis' not in data:
+            data['critical_analysis'] = {}
+
+        ca = data['critical_analysis']
+        ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
+        ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
+        ca.setdefault('core_doubts', [])
+        ca.setdefault('ethical_boundaries', {})
+
+        # ═══════════════════════════════════════════════════════════
+        # 🔑 Step 2: 处理数组字段（确保都是数组）
+        # ═══════════════════════════════════════════════════════════
+
+        array_fields = ['chapters', 'core_concepts', 'key_insights', 'key_cases', 'key_quotes']
+
+        for field in array_fields:
+            if field not in data:
+                data[field] = []
+            elif not isinstance(data[field], list):
+                data[field] = []
+
+        # ═══════════════════════════════════════════════════════════
+        # 🔑 Step 3: 处理嵌套结构中的不规范格式
+        # ═══════════════════════════════════════════════════════════
+
         # 处理 core_drivers（应该是数组，LLM 可能返回字符串）
         for section in ['core_concepts', 'key_cases']:
             if section in data and isinstance(data[section], list):
                 for item in data[section]:
-                    if 'core_drivers' in item and isinstance(item['core_drivers'], str):
-                        # 将逗号分隔的字符串转为数组
-                        item['core_drivers'] = [s.strip() for s in item['core_drivers'].replace(',', ',').split('、') if s.strip()]
-        
+                    if isinstance(item, dict):
+                        if 'core_drivers' in item and isinstance(item['core_drivers'], str):
+                            # 将逗号分隔的字符串转为数组
+                            item['core_drivers'] = [s.strip() for s in item['core_drivers'].replace(',', ',').split('、') if s.strip()]
+                        # 确保其他必填字段存在
+                        item.setdefault('name', item.get('name', '未命名'))
+                        item.setdefault('definition', item.get('definition', '定义待补充'))
+
         # 处理 multi_perspectives（应该是对象，LLM 可能返回字符串）
         if 'key_insights' in data and isinstance(data['key_insights'], list):
             for item in data['key_insights']:
-                if 'multi_perspectives' in item and isinstance(item['multi_perspectives'], str):
-                    # 将字符串转为对象
-                    item['multi_perspectives'] = {"其他视角": item['multi_perspectives']}
-        
+                if isinstance(item, dict):
+                    if 'multi_perspectives' in item and isinstance(item['multi_perspectives'], str):
+                        # 将字符串转为对象
+                        item['multi_perspectives'] = {"其他视角": item['multi_perspectives']}
+                    item.setdefault('multi_perspectives', {})
+                    # 确保其他必填字段存在
+                    item.setdefault('title', item.get('title', '未命名洞见'))
+                    item.setdefault('description', item.get('description', '描述待补充'))
+                    item.setdefault('underlying_logic', item.get('underlying_logic', '底层逻辑待补充'))
+                    item.setdefault('controversies', item.get('controversies', '争议待补充'))
+
         # 处理 core_doubts（应该是对象数组，LLM 可能返回字符串）
         if 'critical_analysis' in data:
             ca = data['critical_analysis']
@@ -770,30 +980,41 @@ class LLMClient:
                 for i, item in enumerate(ca['core_doubts']):
                     if isinstance(item, str):
                         ca['core_doubts'][i] = {"question": item, "analysis": ""}
-            
+
             if 'ethical_boundaries' in ca and isinstance(ca['ethical_boundaries'], str):
                 ca['ethical_boundaries'] = {
                     "reasonable": ca['ethical_boundaries'],
                     "dangerous": "",
                     "institutional_safeguards": ""
                 }
-        
+
         # 处理 development_stages（应该是对象数组，LLM 可能返回字符串）
         for section in ['core_concepts', 'key_cases']:
             if section in data and isinstance(data[section], list):
                 for item in data[section]:
-                    if 'development_stages' in item and isinstance(item['development_stages'], list):
-                        for i, stage in enumerate(item['development_stages']):
-                            if isinstance(stage, str):
-                                item['development_stages'][i] = {"name": stage, "description": ""}
-        
+                    if isinstance(item, dict) and 'development_stages' in item:
+                        if isinstance(item['development_stages'], list):
+                            for i, stage in enumerate(item['development_stages']):
+                                if isinstance(stage, str):
+                                    item['development_stages'][i] = {"name": stage, "description": ""}
+                        elif isinstance(item['development_stages'], str):
+                            item['development_stages'] = [{"name": item['development_stages'], "description": ""}]
+
         # 处理 learning_path（应该是对象，各字段为数组，LLM 可能返回字符串）
-        if 'learning_path' in data and isinstance(data['learning_path'], dict):
-            lp = data['learning_path']
-            for key in ['beginner', 'intermediate', 'advanced', 'practice']:
-                if key in lp and isinstance(lp[key], str):
-                    lp[key] = [lp[key]]
-        
+        if 'learning_path' not in data:
+            data['learning_path'] = {}
+
+        lp = data['learning_path']
+        for key in ['beginner', 'intermediate', 'advanced', 'practice']:
+            if key not in lp:
+                lp[key] = []
+            elif isinstance(lp[key], str):
+                lp[key] = [lp[key]]
+
+        # 确保 book_network 存在
+        if 'book_network' not in data:
+            data['book_network'] = {}
+
         return data
 
     def synthesize_book_graph(
