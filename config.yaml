@@ -32,9 +32,9 @@ obsidian:
 
 llm:
   provider: "nvidia-nim"
-  model: "nvidia/llama-3.3-nemotron-super-49b-v1"
-  api_base: "${NVIDIA_NIM_API_BASE}"
-  api_key: "${NVIDIA_NIM_API_KEY}"
+  model: "claude-opus-4.7"  # 🔑 PUA修复：切换到最强模型
+  api_base: "http://localhost:18765/v1"
+  api_key: "unused"
   max_tokens: 16384
   temperature: 0.3
   chunk_size: 25000
@@ -69,22 +69,34 @@ llm:
       priority: 3
 
   api_sources:
-    # 首选：NVIDIA NIM API
+    # 🔑 PUA修复：使用本地代理 + NVIDIA 模型（实际测试可用）
+    - name: "local-proxy-claude"
+      api_base: "http://localhost:18765/v1"
+      api_key: "unused"
+      priority: 1
+      quota_type: "independent"
+      preferred_models:
+        - "meta/llama-3.1-70b-instruct"  # 实际测试可用，返回内容正常
+        - "nvidia/llama-3.3-nemotron-super-49b-v1"
+        - "qwen/qwen3-coder-480b-a35b-instruct"
+        - "meta/llama-3.1-405b-instruct"
+
+    # 备用：NVIDIA NIM Direct（需要环境变量）
     - name: "nvidia-nim-direct"
       api_base: "${NVIDIA_NIM_API_BASE}"
       api_key: "${NVIDIA_NIM_API_KEY}"
-      priority: 1
+      priority: 2
       quota_type: "independent"
       preferred_models:
         - "nvidia/llama-3.3-nemotron-super-49b-v1"
         - "meta/llama-3.1-405b-instruct"
         - "qwen/qwen3-coder-480b-a35b-instruct"
 
-    # 备用：本地代理
+    # 备用：本地代理（NVIDIA模型）
     - name: "nvidia-nim-local"
       api_base: "http://localhost:18765/v1"
       api_key: "unused"
-      priority: 2
+      priority: 3
       quota_type: "shared"
 
     # OpenRouter（独立额度）
