@@ -55,6 +55,14 @@ class BookGraphQualityChecker:
         "（内容由模型生成）",
         # 简介占位符
         "简介待补充", "待补充具体",
+        # 🔑 新增：章节内容占位符（最严重的偷懒！）
+        "书中未涉及此项内容",
+        "书中未涉及此项",
+        "此章节省略",
+        "中间章节省略",
+        "实际输出时请完整复制",
+        "具体内容已省略",
+        "此处省略",
     ]
 
     # ═══════════════════════════════════════════════════════════
@@ -186,6 +194,15 @@ class BookGraphQualityChecker:
             # 🔑 PUA级要求：章节合并直接判定为不合格！
             merged_list = [f"'{ch.get('chapter_number', '')}'" for ch in merged_chapters]
             issues.append(f"⛔ 发现章节合并偷懒行为：{', '.join(merged_list)}（禁止用'1-10'、'11-22'等合并编号）")
+
+        # 🔑 新增：章节占位符检测（最严重的偷懒！）
+        placeholder_chapters = self._detect_placeholder_chapters(chapters)
+        stats['placeholder_chapters'] = placeholder_chapters
+
+        if placeholder_chapters:
+            # 🔑 PUA级要求：章节占位符直接判定为不合格！
+            placeholder_list = [f"章节'{p['chapter'].get('chapter_number', '')}'含'{p['keyword']}'" for p in placeholder_chapters]
+            issues.append(f"⛔ 发现章节占位符偷懒行为：{', '.join(placeholder_list[:5])}（禁止用N/A、书中未涉及等占位符）")
 
         # 🔑 新增：预期章节数对比
         if expected_chapters > 0:
@@ -442,6 +459,45 @@ class BookGraphQualityChecker:
 
         return merged
 
+    def _detect_placeholder_chapters(self, chapters: List[Dict]) -> List[Dict]:
+        """
+        🔑 新增：检测章节占位符偷懒行为
+
+        检测 LLM 是否用 "N/A"、"书中未涉及此项内容" 等占位符偷懒
+
+        Args:
+            chapters: 章节列表
+
+        Returns:
+            List[Dict]: 占位符章节列表（用于报告）
+        """
+        placeholder_chapters = []
+
+        # 章节占位符关键词
+        chapter_placeholder_keywords = [
+            "N/A", "NULL", "TBD", "TODO",
+            "书中未涉及此项内容", "书中未涉及此项",
+            "此章节省略", "中间章节省略",
+            "具体内容已省略", "此处省略",
+        ]
+
+        for ch in chapters:
+            chapter_num = ch.get('chapter_number', '')
+            title = ch.get('title', '')
+            core_argument = ch.get('core_argument', '')
+
+            # 检查章节编号是否是占位符
+            for kw in chapter_placeholder_keywords:
+                if kw in chapter_num or kw in title or kw in core_argument:
+                    placeholder_chapters.append({
+                        'chapter': ch,
+                        'keyword': kw,
+                        'field': 'chapter_number' if kw in chapter_num else ('title' if kw in title else 'core_argument')
+                    })
+                    break
+
+        return placeholder_chapters
+
     def _check_chapter_discontinuity(self, chapters: List[Dict]) -> List[str]:
         """
         🔑 新增：检查章节编号连续性
@@ -631,6 +687,10 @@ class BookGraphQualityChecker:
         merged_count = len(stats.get('merged_chapters', []))
         base_score -= merged_count * 50  # 每个合并章节扣50分！
 
+        # 🔑 新增：章节占位符扣分（最严重！直接扣50分）
+        placeholder_chapter_count = len(stats.get('placeholder_chapters', []))
+        base_score -= placeholder_chapter_count * 50  # 每个占位符章节扣50分！
+
         # 🔑 新增：章节覆盖率扣分
         coverage = stats.get('chapter_coverage', 1.0)
         if coverage < 0.5:
@@ -728,6 +788,7 @@ def check_book_graph_quality(data: Dict, expected_chapters: int = 0) -> Tuple[bo
 
     # 🔑 新增：章节合并和覆盖率显示
     merged_count = len(result.stats.get('merged_chapters', []))
+    placeholder_chapter_count = len(result.stats.get('placeholder_chapters', []))
     coverage = result.stats.get('chapter_coverage', 1.0)
     expected = result.stats.get('expected_chapters', 0)
 
@@ -746,6 +807,7 @@ def check_book_graph_quality(data: Dict, expected_chapters: int = 0) -> Tuple[bo
 |------|------|------|------|
 | 章节数 | {result.stats.get('chapter_count', 0)}/{expected_str} | ≥ {checker.MIN_CHAPTERS} {'(覆盖率:' + coverage_str + ')' if expected > 0 else ''} | {'✅' if result.stats.get('chapter_count', 0) >= checker.MIN_CHAPTERS else '❌'} |
 | 🔑 章节合并 | {merged_count} | 0 | {'❌ 发现偷懒！' if merged_count > 0 else '✅'} |
+| 🔑 章节占位符 | {placeholder_chapter_count} | 0 | {'❌ 发现偷懒！' if placeholder_chapter_count > 0 else '✅'} |
 | 核心概念 | {result.stats.get('concept_count', 0)} | ≥ {checker.MIN_CONCEPTS} | {'✅' if result.stats.get('concept_count', 0) >= checker.MIN_CONCEPTS else '❌'} |
 | 金句数 | {result.stats.get('quote_count', 0)} | ≥ {checker.MIN_QUOTES} | {'✅' if result.stats.get('quote_count', 0) >= checker.MIN_QUOTES else '❌'} |
 | 关键洞见 | {result.stats.get('insight_count', 0)} | ≥ {checker.MIN_INSIGHTS} | {'✅' if result.stats.get('insight_count', 0) >= checker.MIN_INSIGHTS else '❌'} |
