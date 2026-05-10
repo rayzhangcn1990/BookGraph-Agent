@@ -202,59 +202,40 @@ class LLMClient:
                         self._select_model_from_pool()
                         return
 
-        # 从配置读取 API 信息（单源模式）
-        api_key = self.config.get('api_key', 'unused')
-        base_url = self.config.get('api_base', '')
-
-        # 优先使用配置文件中的设置
-        if base_url:
-            self.api_base = base_url
-
-            # 使用 OpenAI 客户端连接本地 OpenRelay 服务
-            if OPENAI_AVAILABLE:
-                try:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key,
-                        base_url=base_url,
-                        timeout=self.config.get('timeout', 600),
-                    )
-                    self.provider = 'anthropic'  # OpenRelay 使用 Anthropic 格式
-
-                    print(f"✅ OpenRelay 客户端初始化成功（模型：{self.model}）")
-                    print(f"   API Base: {base_url}")
-
-                    # 🔑 设置模型轮换列表
-                    self._setup_model_rotation()
-                    return
-                except Exception as e:
-                    print(f"⚠️ OpenRelay 客户端初始化失败: {e}")
-
-        # 尝试 Anthropic（从 Claude Code 设置读取）
-        if ANTHROPIC_AVAILABLE and not self.openai_client:
+        # 🔑 优先尝试 Anthropic 兼容端点（当 provider 为 anthropic 时）
+        if self.provider == 'anthropic' and ANTHROPIC_AVAILABLE:
             api_key_env = os.environ.get('ANTHROPIC_AUTH_TOKEN') or os.environ.get('ANTHROPIC_API_KEY', '')
             base_url_env = os.environ.get('ANTHROPIC_BASE_URL', '')
 
-            # 从 Claude Code settings.json 读取
-            if not api_key_env or not base_url_env:
-                settings_path = Path.home() / '.claude' / 'settings.json'
-                if settings_path.exists():
-                    try:
-                        with open(settings_path) as f:
-                            env = json.load(f).get('env', {})
-                        api_key_env = api_key_env or env.get('ANTHROPIC_AUTH_TOKEN', '')
-                        base_url_env = base_url_env or env.get('ANTHROPIC_BASE_URL', '')
+            # 从 Claude Code settings.json 读取（总是读取 model，因为配置可能滞后）
+            settings_path = Path.home() / '.claude' / 'settings.json'
+            if settings_path.exists():
+                try:
+                    with open(settings_path) as f:
+                        env = json.load(f).get('env', {})
+                    api_key_env = api_key_env or env.get('ANTHROPIC_AUTH_TOKEN', '')
+                    base_url_env = base_url_env or env.get('ANTHROPIC_BASE_URL', '')
+                    if env.get('ANTHROPIC_MODEL'):
                         self.model = env.get('ANTHROPIC_MODEL', self.model)
-                    except Exception:
-                        pass
+                except Exception:
+                    pass
 
             if api_key_env and base_url_env:
+                # 创建 Anthropic 原生客户端（备用）
                 self.anthropic_client = anthropic.Anthropic(
                     api_key=api_key_env,
                     base_url=base_url_env,
                     timeout=180,
                 )
+                # 🔑 同时创建 OpenAI 客户端 — 需要 /v1 前缀
+                if OPENAI_AVAILABLE:
+                    self.openai_client = openai.OpenAI(
+                        api_key=api_key_env,
+                        base_url=base_url_env.rstrip("/") + "/v1",
+                        timeout=180,
+                    )
                 self.provider = 'anthropic'
-                print(f"✅ Anthropic 客户端初始化成功（模型：{self.model}）")
+                print(f"✅ 客户端初始化成功（模型：{self.model}）")
                 print(f"   API Base: {base_url_env}")
                 return
 
@@ -372,10 +353,12 @@ class LLMClient:
 
         替换旧的 _auto_select_model 和 _setup_model_rotation
         """
-        if not self.model_pool_manager:
-            # 后备：使用旧逻辑
-            self._auto_select_model()
-            self._setup_model_rotation()
+        # 🔑 检查模型池是否启用
+        model_pool_enabled = self.config.get('model_pool', {}).get('enabled', True)
+
+        if not model_pool_enabled or not self.model_pool_manager:
+            # 模型池禁用：直接使用配置的模型
+            logger.info(f"🎯 模型池已禁用，使用配置的模型: {self.model}")
             return
 
         # 🔑 从池管理器获取可用模型配置

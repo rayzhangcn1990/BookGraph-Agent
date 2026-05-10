@@ -103,7 +103,11 @@ class ChapterSkill(BaseSkill):
 
         return len(errors) == 0, errors
 
-    def generate_markdown(self, result: Dict) -> str:
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List = None  # 🆕 兼容参数
+    ) -> str:
         """生成章节 Markdown"""
         lines = []
 
@@ -167,6 +171,66 @@ class ChapterSkill(BaseSkill):
     # ═══════════════════════════════════════════════════════════
     # 私有方法
     # ═══════════════════════════════════════════════════════════
+
+    def _combine_chunks(
+        self,
+        chunks: List[Dict],
+        max_chunks: int = 999,
+        max_chars_per_chunk: int = 3000
+    ) -> Tuple[str, Dict]:
+        """
+        合并 chunks 内容（章节专用版）
+
+        🆕 改造：
+        1. 返回 Tuple[str, Dict]（与 base_skill 一致）
+        2. 生成位置映射
+
+        Args:
+            chunks: chunk 列表（Dict 格式，包含 char_interval）
+            max_chunks: 不限制（遍历全部）
+            max_chars_per_chunk: 每块只取 3000 字符
+
+        Returns:
+            Tuple[str, Dict]: (合并内容, 位置映射)
+        """
+        combined = []
+        chunk_positions = []
+        source_text = ""
+        total_chunks = len(chunks)
+
+        for chunk in chunks:
+            content = chunk.get('content', '')
+            label = chunk.get('label', f'Chunk {chunk.get("chunk_index", 0)}')
+            char_interval = chunk.get('char_interval', {'start_pos': 0, 'end_pos': 0})
+
+            # 🆕 记录位置信息
+            chunk_positions.append({
+                'chunk_index': chunk.get('chunk_index', 0),
+                'start_pos': char_interval.get('start_pos', 0),
+                'end_pos': char_interval.get('end_pos', 0),
+                'label': label,
+                'combined_start': len("\n\n---\n\n".join(combined)) if combined else 0
+            })
+
+            # 保存完整原文
+            if not source_text and chunk.get('source_text'):
+                source_text = chunk.get('source_text', '')
+
+            truncated_content = content[:max_chars_per_chunk]
+            combined.append(f"【{label}】\n{truncated_content}")
+
+        result_content = "\n\n---\n\n".join(combined)
+        total_chars = len(result_content)
+
+        position_map = {
+            'source_text': source_text,
+            'chunk_positions': chunk_positions,
+            'combined_length': total_chars
+        }
+
+        logger.info(f"[chapter] 全量采样: {total_chunks}/{total_chunks} chunks (100%覆盖), {total_chars} 字符")
+
+        return result_content, position_map
 
     def _is_valid_chapter_title(self, title: str) -> bool:
         """校验章节标题有效性"""

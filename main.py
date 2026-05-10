@@ -125,28 +125,55 @@ async def process_single_book_optimized(
 
         logger.info(f"   ✅ Chunk 分析完成: {len(chunk_results)} 个成功")
 
-        # Step 4: 综合分析
-        # 🔑 新增：获取预期章节数（用于质量校验，防止LLM偷懒）
+        # 🔑 新增：预期章节数（用于质量校验）
         expected_chapters = len(parse_result.chapters) if parse_result.chapters else 0
         logger.info(f"   📖 预期章节数: {expected_chapters}")
 
-        synthesis = await _synthesize_results(
+        # Step 4: 综合分析（多轮拆分）
+        # 🔑 PUA修复：拆分 synthesis 为多轮低复杂度任务
+        # 根因：minimax 处理完整 BookGraph 复杂度太高，输出偷懒
+        # 方案：拆成 5 轮，每轮输出 <2KB
+        from core.multi_round_synthesis import synthesize_multi_round
+
+        synthesis = await synthesize_multi_round(
+            llm_client,
             chunk_results,
             book_title,
-            parse_result.metadata,
+            parse_result.metadata.get('author', 'Unknown'),
             discipline,
-            config,
-            expected_chapters  # 🔑 新增参数
+            expected_chapters
         )
 
-        logger.info(f"   ✅ 综合分析完成")
+        if not synthesis:
+            raise Exception("多轮综合分析失败")
+
+        logger.info(f"   ✅ 多轮综合分析完成")
+
+        # 🔑 新增：将 dict 转换为 BookGraph 对象
+        from schemas.book_graph_schema import BookGraph
+        from core.llm_client import LLMClient
+
+        # 规范化数据（填充缺失字段）
+        synthesis_dict = llm_client._normalize_book_graph_data(
+            synthesis,
+            parse_result.metadata
+        )
+
+        # 构造 BookGraph 对象
+        try:
+            book_graph = BookGraph(**synthesis_dict)
+            logger.info(f"   ✅ BookGraph 构造成功（章节数: {len(book_graph.chapters)}）")
+        except Exception as e:
+            logger.warning(f"   ⚠️ BookGraph 构造失败，使用 dict fallback: {str(e)[:50]}")
+            # Fallback: 修改 GraphGenerator 支持接受 dict
+            book_graph = synthesis_dict
 
         # Step 5: 写入 Obsidian
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
         graph_generator = GraphGenerator(config)
 
-        markdown_content = graph_generator.generate_book_graph_markdown(synthesis)
-        output_path = obsidian_writer.write_book_graph(synthesis, markdown_content)
+        markdown_content = graph_generator.generate_book_graph_markdown(book_graph)
+        output_path = obsidian_writer.write_book_graph(book_graph, markdown_content)
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"✅ 处理完成: {output_path} ({elapsed:.1f}秒)")
@@ -453,7 +480,7 @@ def main():
 
     if args.batch or input_path.is_dir():
         # 批量处理
-        book_paths = list(input_path.glob("*.epub")) + list(input_path.glob("*.pdf"))
+        book_paths = list(input_path.glob("*.epub")) + list(input_path.glob("*.pdf")) + list(input_path.glob("*.mobi"))
         if not book_paths:
             logger.error(f"未找到书籍文件: {input_path}")
             return

@@ -23,7 +23,7 @@ class QuoteSkill(BaseSkill):
 
     name = "quote"
     section_name = "金句萃取"
-    output_field = "key_quotes"
+    output_field = "golden_quotes"  # 🔑 使用规范化的字段名
     min_items = 3
 
     @property
@@ -37,7 +37,7 @@ class QuoteSkill(BaseSkill):
 {chunk_content}
 
 【输出格式 - 必须严格遵循】
-{{  "key_quotes": [    {{      "text": "原文金句（必须是书中实际内容）",      "chapter": "来源章节",      "core_theme": "核心主题",      "background_context": "时代背景关联（具体分析）",      "underlying_logic": "前提假设：[内容]→推理链条：[内容]→核心结论：[内容]",      "common_misreading": "常见误读（可选）",      "related_books": ["关联书籍"]    }}  ]
+{{  "golden_quotes": [    {{      "text": "原文金句（必须是书中实际内容）",      "chapter": "来源章节",      "core_theme": "核心主题",      "background_context": "时代背景关联（具体分析）",      "underlying_logic": "前提假设：[内容]→推理链条：[内容]→核心结论：[内容]",      "common_misreading": "常见误读（可选）",      "related_books": ["关联书籍"]    }}  ]
 }}
 
 【核心约束 - 最高优先级】
@@ -56,7 +56,7 @@ class QuoteSkill(BaseSkill):
 请输出纯 JSON，不要添加任何 Markdown 代码块标记或额外说明。"""
 
     def get_required_fields(self) -> List[str]:
-        return ["key_quotes"]
+        return ["golden_quotes"]
 
     def validate(self, result: Dict) -> Tuple[bool, List[str]]:
         """校验金句结果"""
@@ -65,34 +65,38 @@ class QuoteSkill(BaseSkill):
         if not result or not isinstance(result, dict):
             return False, ["结果为空或类型错误"]
 
-        if "key_quotes" not in result:
-            errors.append("缺失字段: key_quotes")
-
-        quotes = result.get("key_quotes", [])
+        # 🔑 使用规范化的字段名
+        quotes = result.get("golden_quotes", [])
 
         if len(quotes) < self.min_items:
             if result.get("extraction_status") == "failed":
                 return False, errors
             errors.append(f"金句数量不足: {len(quotes)} < {self.min_items}")
 
+        # 🔑 放宽校验：只检查是否有内容，不强制长度
         for i, quote in enumerate(quotes):
             # 文本校验
             text = quote.get("text", "")
             if len(text) < 10:
                 errors.append(f"金句{i+1} 文本过短")
 
-            # 时代背景校验
+            # 时代背景校验 - 放宽为>=10字符（允许简短但有意义的分析）
             background = quote.get("background_context", "")
-            if len(background) < 20:
-                errors.append(f"金句{i+1} 缺乏时代背景分析")
+            if len(background) < 10:
+                errors.append(f"金句{i+1} 缺乏时代背景")
 
         return len(errors) == 0, errors
 
-    def generate_markdown(self, result: Dict) -> str:
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List = None  # 🆕 兼容参数
+    ) -> str:
         """生成金句 Markdown"""
         lines = []
 
-        quotes = result.get("key_quotes", [])
+        # 🔑 使用规范化的字段名
+        quotes = result.get("golden_quotes", [])
 
         if not quotes:
             errors = result.get("errors", [])

@@ -6,6 +6,8 @@ Skill 基类定义
 - validate: 结果校验
 - generate_markdown: Markdown 生成
 - run_and_write: 完整流程（执行→校验→写入）
+
+🆕 改造：支持源文本对齐追踪
 """
 
 import asyncio
@@ -15,6 +17,12 @@ import re
 from abc import ABC, abstractmethod
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
+
+# 🆕 导入 Extraction 相关类型
+from schemas.extraction_schema import (
+    Extraction, ExtractionResult, AlignmentStatus,
+    CharInterval, ChunkInfo
+)
 
 logger = logging.getLogger("BookGraph-Agent")
 
@@ -28,6 +36,13 @@ class SkillResult:
     errors: List[str]
     from_cache: bool = False
     elapsed_seconds: float = 0.0
+
+    # 🆕 新增：Extraction 结果列表
+    extractions: List[Extraction] = None
+
+    def __post_init__(self):
+        if self.extractions is None:
+            self.extractions = []
 
 
 class BaseSkill(ABC):
@@ -65,7 +80,7 @@ class BaseSkill(ABC):
     async def execute(
         self,
         llm_client,
-        chunks: List[Tuple[int, str, str]],
+        chunks: List[Dict],  # 🆕 改为 Dict 格式（包含 char_interval）
         book_title: str,
         use_cache: bool = True
     ) -> Dict:
@@ -91,8 +106,12 @@ class BaseSkill(ABC):
                 logger.info(f"[{self.name}] 使用缓存结果")
                 return cached
 
-        # 合并 chunks 内容
-        combined_content = self._combine_chunks(chunks)
+        # 合并 chunks 内容（🆕 现在返回 Tuple[str, Dict]）
+        combined_result = self._combine_chunks(chunks)
+        combined_content, position_map = combined_result  # 解包 tuple
+
+        # 🆕 保存位置映射，供后续对齐使用
+        self._position_map = position_map
 
         # 构建提示词
         prompt = self.prompt_template.format(
@@ -193,22 +212,29 @@ class BaseSkill(ABC):
         return len(errors) == 0, errors
 
     @abstractmethod
-    def generate_markdown(self, result: Dict) -> str:
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List[Extraction] = None  # 🆕 新增参数
+    ) -> str:
         """
         生成 Markdown 内容
 
+        🆕 改造：接收 extractions 参数，用于显示位置引用
+
         Args:
             result: 提取结果
+            extractions: Extraction 列表（带位置信息）
 
         Returns:
-            str: Markdown 内容
+            str: Markdown 内容（可包含位置引用链接）
         """
         pass
 
     async def run_and_write(
         self,
         llm_client,
-        chunks: List[Tuple[int, str, str]],
+        chunks: List[Dict],  # 🆕 改为 Dict 格式
         book_title: str,
         obsidian_writer,
         discipline: str
@@ -240,8 +266,13 @@ class BaseSkill(ABC):
             # 校验失败时，使用后备结果
             result = self._create_fallback_result(errors)
 
-        # Step 3: 生成 Markdown
-        markdown = self.generate_markdown(result)
+        # 🆕 Step 2.5: 创建 Extractions（源文本对齐）
+        extractions = []
+        if is_valid and hasattr(self, '_position_map') and self._position_map:
+            extractions = self._convert_result_to_extractions(result)
+
+        # Step 3: 生成 Markdown（🆕 传入 extractions）
+        markdown = self.generate_markdown(result, extractions=extractions)
 
         # Step 4: 增量写入
         try:
@@ -264,6 +295,7 @@ class BaseSkill(ABC):
             success=is_valid,
             result=result,
             errors=errors,
+            extractions=extractions,  # 🆕 填充 extractions
             elapsed_seconds=elapsed
         )
 
@@ -281,33 +313,96 @@ class BaseSkill(ABC):
 3. 底层逻辑必须使用单行箭头格式：前提假设：[内容]→推理链条：[内容]→核心结论：[内容]
 4. 输出纯 JSON，不含任何其他内容"""
 
-    def _combine_chunks(self, chunks: List[Tuple[int, str, str]], max_chunks: int = 5, max_chars_per_chunk: int = 8000) -> str:
+    def _combine_chunks(
+        self,
+        chunks: List[Dict],
+        max_chunks: int = 5,
+        max_chars_per_chunk: int = 8000
+    ) -> Tuple[str, Dict]:
         """
-        合并 chunks 内容（智能截断版）
+        合并 chunks 内容（智能采样版）
+
+        🆕 改造：
+        1. 适配新的 Dict 格式 chunks（包含 char_interval）
+        2. 返回位置映射（用于后续对齐）
 
         Args:
-            chunks: chunk 列表 [(index, content, label)]
-            max_chunks: 最大合并数量（避免输入超长）
+            chunks: chunk 列表，每个元素是 Dict:
+                - chunk_index: 序号
+                - content: 内容
+                - label: 标签
+                - char_interval: {start_pos, end_pos}
+                - source_text: 完整原文
+            max_chunks: 每段最大采样数量
             max_chars_per_chunk: 每块最大字符数
 
         Returns:
-            str: 合并后的内容（控制在 token 限制内）
+            Tuple[str, Dict]: (合并内容, 位置映射)
+                位置映射格式: {
+                    "source_text": 完整原文,
+                    "chunk_positions": [
+                        {"chunk_index": 0, "start_pos": 100, "end_pos": 200, "label": "第一章"},
+                        ...
+                    ]
+                }
         """
+        total_chunks = len(chunks)
+
+        # 🔑 智能采样策略
+        if total_chunks <= max_chunks * 2:
+            selected_indices = range(total_chunks)
+        else:
+            head_count = max_chunks
+            tail_count = max_chunks
+            middle_count = max_chunks
+
+            head_indices = list(range(0, head_count))
+            middle_start = total_chunks // 2 - middle_count // 2
+            middle_indices = list(range(middle_start, middle_start + middle_count))
+            tail_indices = list(range(total_chunks - tail_count, total_chunks))
+
+            selected_indices = sorted(set(head_indices + middle_indices + tail_indices))
+
         combined = []
+        chunk_positions = []
+        source_text = ""
 
-        # 🔑 只取前 max_chunks 个 chunks（避免输入超长）
-        selected_chunks = chunks[:max_chunks]
+        for idx in selected_indices:
+            if idx < len(chunks):
+                chunk = chunks[idx]
+                content = chunk.get("content", "")
+                label = chunk.get("label", f"Chunk {idx}")
+                char_interval = chunk.get("char_interval", {"start_pos": 0, "end_pos": 0})
 
-        for idx, content, label in selected_chunks:
-            # 🔑 每块截断到 max_chars_per_chunk
-            truncated_content = content[:max_chars_per_chunk]
-            combined.append(f"【{label}】\n{truncated_content}")
+                # 🆕 记录位置信息
+                chunk_positions.append({
+                    "chunk_index": idx,
+                    "start_pos": char_interval.get("start_pos", 0),
+                    "end_pos": char_interval.get("end_pos", 0),
+                    "label": label,
+                    "combined_start": len("\n\n---\n\n".join(combined)) if combined else 0
+                })
 
-        result = "\n\n---\n\n".join(combined)
+                # 保存完整原文
+                if not source_text and chunk.get("source_text"):
+                    source_text = chunk.get("source_text", "")
 
-        # 🔑 日志提示
-        total_chars = len(result)
-        logger.info(f"[{self.name}] 输入截断: {len(selected_chunks)}/{len(chunks)} chunks, {total_chars} 字符")
+                truncated_content = content[:max_chars_per_chunk]
+                combined.append(f"【{label}】\n{truncated_content}")
+
+        result_content = "\n\n---\n\n".join(combined)
+        total_chars = len(result_content)
+        coverage = len(selected_indices) / total_chunks * 100
+
+        position_map = {
+            "source_text": source_text,
+            "chunk_positions": chunk_positions,
+            "combined_length": total_chars
+        }
+
+        logger.info(f"[{self.name}] 智能采样: {len(selected_indices)}/{total_chunks} chunks ({coverage:.1f}%覆盖), {total_chars} 字符")
+
+        return result_content, position_map
 
         return result
 
@@ -400,3 +495,342 @@ class BaseSkill(ABC):
             "fallback_note": f"此部分内容生成失败，待手动修复",
             self.output_field: []
         }
+
+    # ═══════════════════════════════════════════════════════════
+    # 🆕 源文本对齐方法（借鉴 langextract）
+    # ═══════════════════════════════════════════════════════════
+
+    def _create_extraction(
+        self,
+        extraction_class: str,
+        extraction_text: str,
+        position_map: Dict,
+        attributes: Dict = None
+    ) -> Extraction:
+        """
+        创建单条 Extraction（自动对齐到原文）
+
+        Args:
+            extraction_class: 提取类型（concept/insight/case等）
+            extraction_text: 提取的文本
+            position_map: 位置映射（包含 source_text）
+            attributes: 额外属性
+
+        Returns:
+            Extraction: 带位置信息的提取结果
+        """
+        source_text = position_map.get("source_text", "")
+
+        # 🔑 尝试对齐到原文
+        char_interval, alignment_status = self._align_extraction(
+            extraction_text, source_text
+        )
+
+        return Extraction(
+            extraction_class=extraction_class,
+            extraction_text=extraction_text,
+            char_interval=char_interval,
+            alignment_status=alignment_status,
+            attributes=attributes,
+            source_snippet=source_text[char_interval.start_pos:char_interval.end_pos] if char_interval else None
+        )
+
+    def _align_extraction(
+        self,
+        extraction_text: str,
+        source_text: str,
+        fuzzy_threshold: float = 0.75
+    ) -> Tuple[Optional[CharInterval], AlignmentStatus]:
+        """
+        将提取文本对齐到原文位置
+
+        使用 LCS（最长公共子序列）算法实现模糊匹配。
+        借鉴 langextract 的 Resolver 设计。
+
+        Args:
+            extraction_text: LLM 提取的文本
+            source_text: 完整原文
+            fuzzy_threshold: 模糊匹配阈值（默认 75%）
+
+        Returns:
+            Tuple[Optional[CharInterval], AlignmentStatus]: (位置区间, 对齐状态)
+        """
+        if not extraction_text or not source_text:
+            return None, AlignmentStatus.UNGROUNDED
+
+        # 1. 尝试精确匹配
+        exact_pos = source_text.find(extraction_text)
+        if exact_pos >= 0:
+            return CharInterval(
+                start_pos=exact_pos,
+                end_pos=exact_pos + len(extraction_text)
+            ), AlignmentStatus.MATCH_EXACT
+
+        # 2. 尝试 LCS 模糊匹配
+        best_match = self._lcs_find_position(extraction_text, source_text)
+
+        if best_match:
+            match_text = source_text[best_match["start"]:best_match["end"]]
+            similarity = best_match["similarity"]
+
+            if similarity >= fuzzy_threshold:
+                # 根据匹配长度判断状态
+                if len(match_text) > len(extraction_text):
+                    status = AlignmentStatus.MATCH_GREATER
+                elif len(match_text) < len(extraction_text):
+                    status = AlignmentStatus.MATCH_LESSER
+                else:
+                    status = AlignmentStatus.MATCH_FUZZY
+
+                return CharInterval(
+                    start_pos=best_match["start"],
+                    end_pos=best_match["end"]
+                ), status
+
+        # 3. 无法定位
+        return None, AlignmentStatus.UNGROUNDED
+
+    def _lcs_find_position(
+        self,
+        pattern: str,
+        text: str
+    ) -> Optional[Dict]:
+        """
+        LCS 算法：在 text 中找到 pattern 的最佳匹配位置
+
+        实现最长公共子序列匹配，返回最佳匹配区间。
+
+        Args:
+            pattern: 待匹配文本（LLM提取）
+            text: 源文本
+
+        Returns:
+            Optional[Dict]: {
+                "start": 起始位置,
+                "end": 结束位置,
+                "similarity": 相似度,
+                "matched_length": 匹配长度
+            }
+        """
+        if not pattern or not text:
+            return None
+
+        pattern_len = len(pattern)
+        text_len = len(text)
+
+        # 滑动窗口搜索
+        best_match = None
+        best_similarity = 0
+
+        # 优化：只在可能匹配的区域搜索
+        # 搜索窗口大小 = pattern长度 * 1.5（允许一定扩展）
+        window_size = int(pattern_len * 1.5)
+        step = max(1, pattern_len // 4)  # 步长
+
+        for start in range(0, text_len - pattern_len + 1, step):
+            end = min(start + window_size, text_len)
+            window_text = text[start:end]
+
+            # 计算 LCS 长度
+            lcs_length = self._compute_lcs_length(pattern, window_text)
+
+            # 计算相似度
+            similarity = lcs_length / pattern_len
+
+            if similarity > best_similarity:
+                best_similarity = similarity
+                # 精确定位匹配区间（尝试缩小范围）
+                refined_start, refined_end = self._refine_match_position(
+                    pattern, text, start, end
+                )
+                best_match = {
+                    "start": refined_start,
+                    "end": refined_end,
+                    "similarity": similarity,
+                    "matched_length": lcs_length
+                }
+
+        return best_match if best_similarity > 0.5 else None
+
+    def _compute_lcs_length(self, s1: str, s2: str) -> int:
+        """
+        计算两个字符串的最长公共子序列长度
+
+        使用动态规划实现。
+
+        Args:
+            s1: 字符串1
+            s2: 字符串2
+
+        Returns:
+            int: LCS 长度
+        """
+        m, n = len(s1), len(s2)
+
+        # 优化：对于长字符串，使用滚动数组
+        if m > 500 or n > 500:
+            # 简化版：只计算近似 LCS
+            return self._approximate_lcs(s1, s2)
+
+        # DP 表
+        dp = [[0] * (n + 1) for _ in range(m + 1)]
+
+        for i in range(1, m + 1):
+            for j in range(1, n + 1):
+                if s1[i-1] == s2[j-1]:
+                    dp[i][j] = dp[i-1][j-1] + 1
+                else:
+                    dp[i][j] = max(dp[i-1][j], dp[i][j-1])
+
+        return dp[m][n]
+
+    def _approximate_lcs(self, s1: str, s2: str) -> int:
+        """
+        近似 LCS 计算（用于长字符串）
+
+        使用贪心策略，牺牲精度换取速度。
+
+        Args:
+            s1: 字符串1
+            s2: 字符串2
+
+        Returns:
+            int: 近似 LCS 长度
+        """
+        matched = 0
+        s2_idx = 0
+
+        for ch in s1:
+            # 在 s2 中找当前字符
+            pos = s2.find(ch, s2_idx)
+            if pos >= 0:
+                matched += 1
+                s2_idx = pos + 1
+
+        return matched
+
+    def _refine_match_position(
+        self,
+        pattern: str,
+        text: str,
+        rough_start: int,
+        rough_end: int
+    ) -> Tuple[int, int]:
+        """
+        精细化匹配位置
+
+        在粗略匹配区间内，找到精确的起始和结束位置。
+
+        Args:
+            pattern: 待匹配文本
+            text: 源文本
+            rough_start: 粗略起始位置
+            rough_end: 粗略结束位置
+
+        Returns:
+            Tuple[int, int]: (精确起始, 精确结束)
+        """
+        window = text[rough_start:rough_end]
+
+        # 尝试找到 pattern 首字符在 window 中的位置
+        first_char = pattern[0] if pattern else ""
+        if first_char:
+            first_pos = window.find(first_char)
+            if first_pos >= 0:
+                refined_start = rough_start + first_pos
+                # 尝试匹配末尾
+                last_char = pattern[-1] if pattern else ""
+                last_pos = window.rfind(last_char)
+                if last_pos >= first_pos:
+                    refined_end = rough_start + last_pos + 1
+                    return refined_start, refined_end
+
+        return rough_start, rough_end
+
+    def _create_extraction_result(
+        self,
+        extractions: List[Extraction],
+        success: bool = True,
+        errors: List[str] = None
+    ) -> ExtractionResult:
+        """
+        创建 ExtractionResult 汇总
+
+        Args:
+            extractions: Extraction 列表
+            success: 是否成功
+            errors: 错误列表
+
+        Returns:
+            ExtractionResult: 汇总结果
+        """
+        result = ExtractionResult(
+            skill_name=self.name,
+            extractions=extractions,
+            success=success,
+            errors=errors or []
+        )
+        result.compute_stats()
+        return result
+
+    def _convert_result_to_extractions(self, result: Dict) -> List[Extraction]:
+        """
+        将 JSON Dict 结果转换为 Extraction 列表
+
+        🆕 真正集成 Extraction 到数据流
+
+        Args:
+            result: execute() 返回的 Dict 结果
+
+        Returns:
+            List[Extraction]: 带位置信息的提取列表
+        """
+        extractions = []
+        position_map = getattr(self, '_position_map', {})
+        source_text = position_map.get('source_text', '')
+
+        if not source_text:
+            return extractions
+
+        # 从 result 中提取各个项目
+        items = result.get(self.output_field, [])
+
+        for idx, item in enumerate(items):
+            if isinstance(item, dict):
+                # 尝试提取主要文本字段
+                extraction_text = self._extract_main_text(item)
+                if extraction_text:
+                    extraction = self._create_extraction(
+                        extraction_class=self.name,
+                        extraction_text=extraction_text,
+                        position_map=position_map,
+                        attributes=item  # 保存完整属性
+                    )
+                    extractions.append(extraction)
+
+        # 打印对齐统计
+        grounded = sum(1 for e in extractions if e.is_grounded())
+        logger.info(f"[{self.name}] 源文本对齐: {grounded}/{len(extractions)} 条成功定位")
+
+        return extractions
+
+    def _extract_main_text(self, item: Dict) -> Optional[str]:
+        """
+        从 Dict 中提取主要文本字段（用于对齐）
+
+        不同 Skill 有不同的主字段，子类可覆盖此方法。
+
+        Args:
+            item: 单条提取 Dict
+
+        Returns:
+            Optional[str]: 主要文本
+        """
+        # 默认字段优先级
+        priority_fields = ['name', 'title', 'concept_name', 'quote_text', 'text', 'description']
+
+        for field in priority_fields:
+            if field in item and isinstance(item[field], str):
+                return item[field]
+
+        return None

@@ -132,3 +132,5 @@ logs/
 # Project specific
 output/
 temp/
+# Added by code-review-graph
+.code-review-graph/

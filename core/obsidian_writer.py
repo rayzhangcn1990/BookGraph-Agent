@@ -136,10 +136,13 @@ class ObsidianWriter:
         file_path = books_dir / f"{safe_title}.md"
         
         section_headers = {
-            "核心概念": "## 💡 核心概念",
-            "关键洞见": "## 🔍 关键洞见",
-            "章节结构": "## 📑 章节结构总览",
-            "关键案例": "## 📚 关键案例",
+            "时代背景": "# 📜 一、时代背景",
+            "章节结构": "# 📑 二、章节结构总览",
+            "核心概念": "# 💡 三、核心概念",
+            "关键洞见": "# 🔍 四、关键洞见",
+            "关键案例": "# 📚 五、关键案例",
+            "金句萃取": "# ✨ 六、金句萃取",
+            "批判性解读": "# 🤔 七、批判性解读",
         }
         
         target_header = section_headers.get(section_name, f"## {section_name}")
@@ -152,8 +155,9 @@ class ObsidianWriter:
         
         content = file_path.read_text(encoding="utf-8")
 
-        # 找到章节并替换
-        pattern = target_header + r"\n\n(.*?)(\n---\n\n## |$)"
+        # 找到章节并替换（匹配一级标题格式）
+        # 骨架格式: "# 📜 一、时代背景\n\ncontent\n\n---\n\n"
+        pattern = target_header + r"\n\n(.*?)(\n---\n\n# |$)"
         match = re.search(pattern, content, re.DOTALL)
         
         if match:

@@ -5,11 +5,13 @@
 - 并发处理（Semaphore 控制）
 - 增量写入（每 Skill 完成即写入）
 - 失败汇总（记录所有失败模块）
+- 🔑 Per-Skill 质量检查（PUA 标准：每 Skill 完成即校验）
 """
 
 import asyncio
 import json
 import logging
+import re
 from typing import Dict, List, Tuple, Optional, Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +23,11 @@ from core.skills.concept_skill import ConceptSkill
 from core.skills.insight_skill import InsightSkill
 from core.skills.case_skill import CaseSkill
 from core.skills.quote_skill import QuoteSkill
+from core.skills.background_skill import BackgroundSkill
+from core.skills.critical_skill import CriticalSkill
+
+# 🔑 新增：Per-Skill 质量检查
+from core.book_graph_quality_checker import check_skill_output
 
 logger = logging.getLogger("BookGraph-Agent")
 
@@ -52,11 +59,13 @@ class SkillOrchestrator:
 
         # 初始化所有 Skill
         self.skills = [
+            BackgroundSkill(),  # 时代背景（优先执行，填充 Wikipedia 信息）
             ChapterSkill(),
             ConceptSkill(),
             InsightSkill(),
             CaseSkill(),
             QuoteSkill(),
+            CriticalSkill(),    # 批判性分析（最后执行）
         ]
 
         logger.info(f"🎯 初始化 SkillOrchestrator: {len(self.skills)} 个 Skills")
@@ -67,16 +76,20 @@ class SkillOrchestrator:
         book_info: Dict,
         llm_client,
         obsidian_writer,
-        discipline: str
+        discipline: str,
+        extraction_passes: int = 1  # 🆕 新增参数
     ) -> BookProcessingResult:
         """
         处理一本书
+
+        🆕 改造：支持多轮提取（提高召回率）
 
         Args:
             book_info: 书籍信息 (path, name, char_count)
             llm_client: LLM 客户端
             obsidian_writer: Obsidian 写入器
             discipline: 学科
+            extraction_passes: 提取轮数（默认 1，建议 1-3）
 
         Returns:
             BookProcessingResult: 处理结果
@@ -87,8 +100,14 @@ class SkillOrchestrator:
         book_title = book_info.get("name", "Unknown")
         book_path = book_info.get("path", "")
 
+        # 🆕 从配置读取 extraction_passes
+        if extraction_passes == 1:
+            extraction_passes = self.config.get("extraction", {}).get("passes", 1)
+
         logger.info("=" * 60)
         logger.info(f"📚 开始处理: {book_title}")
+        if extraction_passes > 1:
+            logger.info(f"   🔄 多轮提取模式: {extraction_passes} 轮")
         logger.info("=" * 60)
 
         # Step 1: 解析书籍 → chunks
@@ -111,65 +130,32 @@ class SkillOrchestrator:
         # Step 2: 创建 Obsidian 骨架文件
         self._create_skeleton(obsidian_writer, book_title, discipline)
 
-        # Step 3: 并发执行所有 Skill
-        semaphore = asyncio.Semaphore(self.max_parallel)
+        # 🆕 Step 3: 多轮提取
+        all_pass_results = []  # 存储每轮结果
 
-        # 🔑 总体超时控制（每本书最多10分钟）
-        total_timeout = self.config.get("batch", {}).get("book_timeout", 600)
+        for pass_num in range(1, extraction_passes + 1):
+            if extraction_passes > 1:
+                logger.info(f"\n   🔄 第 {pass_num}/{extraction_passes} 轮提取...")
 
-        async def run_skill(skill: BaseSkill) -> SkillResult:
-            async with semaphore:
-                logger.info(f"   ▶️ 开始执行: [{skill.name}]")
-                try:
-                    # 🔑 单个Skill超时（最多3分钟）
-                    result = await asyncio.wait_for(
-                        skill.run_and_write(
-                            llm_client, chunks, book_title,
-                            obsidian_writer, discipline
-                        ),
-                        timeout=180  # 3分钟超时
-                    )
-                    logger.info(f"   {'✅' if result.success else '❌'} 完成: [{skill.name}]")
-                    return result
-                except asyncio.TimeoutError:
-                    logger.error(f"   ❌ [{skill.name}] 超时（180s）")
-                    return SkillResult(
-                        skill_name=skill.name,
-                        success=False,
-                        result=None,
-                        errors=["Skill执行超时"],
-                        elapsed_seconds=180
-                    )
-
-        # 并发执行（带总体超时）
-        try:
-            results = await asyncio.wait_for(
-                asyncio.gather(
-                    *[run_skill(skill) for skill in self.skills],
-                    return_exceptions=True
-                ),
-                timeout=total_timeout
+            # 并发执行所有 Skill
+            pass_results = await self._run_skills_parallel(
+                chunks, book_title, llm_client, obsidian_writer, discipline
             )
-        except asyncio.TimeoutError:
-            logger.error(f"❌ 书籍处理总超时（{total_timeout}s）")
-            # 返回部分结果
-            results = []
-            for skill in self.skills:
-                results.append(SkillResult(
-                    skill_name=skill.name,
-                    success=False,
-                    result=None,
-                    errors=["总体超时"],
-                    elapsed_seconds=total_timeout
-                ))
+            all_pass_results.append(pass_results)
 
-        # Step 4: 汇总结果
+        # 🆕 Step 4: 合并多轮结果
+        if extraction_passes > 1:
+            merged_results = self._merge_multi_pass_results(all_pass_results)
+        else:
+            merged_results = all_pass_results[0] if all_pass_results else []
+
+        # Step 5: 汇总结果
         skill_results = []
         failed_skills = []
         errors = {}
 
-        for i, result in enumerate(results):
-            skill_name = self.skills[i].name
+        for i, result in enumerate(merged_results):
+            skill_name = self.skills[i].name if i < len(self.skills) else f"Skill-{i}"
 
             if isinstance(result, Exception):
                 failed_skills.append(skill_name)
@@ -183,7 +169,7 @@ class SkillOrchestrator:
                 failed_skills.append(skill_name)
                 errors[skill_name] = ["未知结果类型"]
 
-        # Step 5: 生成完整 BookGraph（汇总所有结果）
+        # Step 6: 生成完整 BookGraph
         output_path = await self._generate_final_book_graph(
             skill_results, book_title, discipline, obsidian_writer
         )
@@ -209,33 +195,191 @@ class SkillOrchestrator:
             output_path=output_path
         )
 
+    async def _run_skills_parallel(
+        self,
+        chunks: List[Dict],
+        book_title: str,
+        llm_client,
+        obsidian_writer,
+        discipline: str
+    ) -> List[SkillResult]:
+        """
+        并发执行所有 Skill（单轮）
+
+        Args:
+            chunks: chunk 列表
+            book_title: 书名
+            llm_client: LLM 客户端
+            obsidian_writer: Obsidian 写入器
+            discipline: 学科
+
+        Returns:
+            List[SkillResult]: 本轮所有 Skill 结果
+        """
+        semaphore = asyncio.Semaphore(self.max_parallel)
+        total_timeout = self.config.get("batch", {}).get("book_timeout", 600)
+
+        async def run_skill(skill: BaseSkill) -> SkillResult:
+            async with semaphore:
+                logger.info(f"   ▶️ 开始执行: [{skill.name}]")
+                try:
+                    result = await asyncio.wait_for(
+                        skill.run_and_write(
+                            llm_client, chunks, book_title,
+                            obsidian_writer, discipline
+                        ),
+                        timeout=180
+                    )
+
+                    # 🔑 Per-Skill 质量检查（PUA 标准）
+                    if result.success and result.result:
+                        quality_passed, quality_msg = check_skill_output(skill.name, result.result)
+                        if not quality_passed:
+                            logger.warning(f"   ⚠️ [{skill.name}] 质量不合格: {quality_msg}")
+                            # 标记质量问题但不影响 success 状态（仅警告）
+                            result.quality_warning = quality_msg
+                        else:
+                            logger.info(f"   ✅ [{skill.name}] 质量检查通过")
+
+                    logger.info(f"   {'✅' if result.success else '❌'} 完成: [{skill.name}]")
+                    return result
+                except asyncio.TimeoutError:
+                    logger.error(f"   ❌ [{skill.name}] 超时（180s）")
+                    return SkillResult(
+                        skill_name=skill.name,
+                        success=False,
+                        result=None,
+                        errors=["Skill执行超时"],
+                        elapsed_seconds=180
+                    )
+
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *[run_skill(skill) for skill in self.skills],
+                    return_exceptions=True
+                ),
+                timeout=total_timeout
+            )
+        except asyncio.TimeoutError:
+            logger.error(f"❌ 本轮超时（{total_timeout}s）")
+            results = []
+            for skill in self.skills:
+                results.append(SkillResult(
+                    skill_name=skill.name,
+                    success=False,
+                    result=None,
+                    errors=["本轮超时"],
+                    elapsed_seconds=total_timeout
+                ))
+
+        return results
+
+    def _merge_multi_pass_results(
+        self,
+        all_pass_results: List[List[SkillResult]]
+    ) -> List[SkillResult]:
+        """
+        合并多轮提取结果
+
+        策略：第一轮优先，后续轮只添加不重叠的 Extraction
+
+        Args:
+            all_pass_results: 每轮的结果列表
+
+        Returns:
+            List[SkillResult]: 合并后的结果
+        """
+        if not all_pass_results:
+            return []
+
+        if len(all_pass_results) == 1:
+            return all_pass_results[0]
+
+        # 以第一轮为基准
+        merged = list(all_pass_results[0])
+
+        # 遍历后续轮
+        for pass_idx, pass_results in enumerate(all_pass_results[1:], 2):
+            logger.info(f"   🔀 合并第 {pass_idx} 轮结果...")
+
+            for skill_idx, result in enumerate(pass_results):
+                if skill_idx >= len(merged):
+                    merged.append(result)
+                    continue
+
+                merged_result = merged[skill_idx]
+
+                # 合并 Extraction
+                if isinstance(result, SkillResult) and isinstance(merged_result, SkillResult):
+                    merged_extractions = merged_result.extractions or []
+                    new_extractions = result.extractions or []
+
+                    # 只添加不重叠的
+                    for new_ext in new_extractions:
+                        if new_ext.char_interval:
+                            overlaps = False
+                            for existing_ext in merged_extractions:
+                                if existing_ext.char_interval and new_ext.char_interval.overlaps(existing_ext.char_interval):
+                                    overlaps = True
+                                    break
+
+                            if not overlaps:
+                                merged_extractions.append(new_ext)
+
+                    merged[skill_idx] = SkillResult(
+                        skill_name=merged_result.skill_name,
+                        success=merged_result.success or result.success,
+                        result=merged_result.result,  # JSON 结果保持第一轮
+                        errors=merged_result.errors,
+                        extractions=merged_extractions,
+                        elapsed_seconds=merged_result.elapsed_seconds + result.elapsed_seconds
+                    )
+
+        # 打印合并统计
+        for i, result in enumerate(merged):
+            if isinstance(result, SkillResult) and result.extractions:
+                logger.info(f"   📊 [{result.skill_name}] 合并后: {len(result.extractions)} 条提取")
+
+        return merged
+
     async def process_books_batch(
         self,
         book_infos: List[Dict],
         llm_client,
         obsidian_writer,
-        discipline: str
+        discipline: str,
+        extraction_passes: int = 1  # 🆕 新增参数
     ) -> List[BookProcessingResult]:
         """
         批量处理多本书
+
+        🆕 改造：支持多轮提取
 
         Args:
             book_infos: 书籍信息列表
             llm_client: LLM 客户端
             obsidian_writer: Obsidian 写入器
             discipline: 学科
+            extraction_passes: 提取轮数（默认 1）
 
         Returns:
             List[BookProcessingResult]: 所有处理结果
         """
         results = []
 
+        # 🆕 从配置读取 extraction_passes
+        if extraction_passes == 1:
+            extraction_passes = self.config.get("extraction", {}).get("passes", 1)
+
         # 逐本处理（每本内部并发）
         for i, book_info in enumerate(book_infos, 1):
             logger.info(f"\n[{i}/{len(book_infos)}] 处理书籍...")
 
+            # 🆕 传递 extraction_passes
             result = await self.process_book(
-                book_info, llm_client, obsidian_writer, discipline
+                book_info, llm_client, obsidian_writer, discipline,
+                extraction_passes=extraction_passes
             )
             results.append(result)
 
@@ -248,8 +392,20 @@ class SkillOrchestrator:
     # 私有方法
     # ═══════════════════════════════════════════════════════════
 
-    async def _parse_book(self, book_path: str, book_title: str) -> List[Tuple[int, str, str]]:
-        """解析书籍，生成 chunks"""
+    async def _parse_book(self, book_path: str, book_title: str) -> List[Dict]:
+        """
+        解析书籍，生成 chunks
+
+        🆕 改造：返回带位置信息的 chunks，每个 chunk 包含：
+            - chunk_index: 序号
+            - content: 内容
+            - label: 标签（章节标题）
+            - char_interval: {start_pos, end_pos} 在原文中的位置
+            - source_text: 完整原文（用于对齐）
+
+        Returns:
+            List[Dict]: chunks 列表
+        """
         try:
             from main import BookParser
 
@@ -261,26 +417,62 @@ class SkillOrchestrator:
                 logger.error(f"解析失败: {parse_result.error}")
                 return []
 
-            # 分块
+            # 🆕 合并所有章节内容，保存完整原文
+            full_content = ""
+            chapter_positions = []
+            current_pos = 0
+
+            for i, chapter in enumerate(parse_result.chapters):
+                content = chapter.get("content", "")
+                title = chapter.get("title", f"第{i+1}章")
+
+                # 记录章节位置
+                chapter_positions.append({
+                    "chapter_index": i,
+                    "title": title,
+                    "start_pos": current_pos,
+                    "end_pos": current_pos + len(content)
+                })
+
+                full_content += content
+                current_pos += len(content)
+
+            # 分块（带位置信息）
             chunks = []
             max_chunk_size = self.config.get("llm", {}).get("chunk_size", 30000)
 
             for i, chapter in enumerate(parse_result.chapters):
                 content = chapter.get("content", "")
                 title = chapter.get("title", f"第{i+1}章")
+                chapter_start = chapter_positions[i]["start_pos"]
 
                 if len(content) <= max_chunk_size:
-                    chunks.append((len(chunks), content, title))
+                    chunks.append({
+                        "chunk_index": len(chunks),
+                        "content": content,
+                        "label": title,
+                        "char_interval": {
+                            "start_pos": chapter_start,
+                            "end_pos": chapter_start + len(content)
+                        },
+                        "source_text": full_content  # 🆕 传递完整原文
+                    })
                 else:
                     # 大章节拆分
                     for j in range(0, len(content), max_chunk_size):
                         sub_content = content[j:j+max_chunk_size]
-                        chunks.append((
-                            len(chunks),
-                            sub_content,
-                            f"{title} - 部分{j//max_chunk_size+1}"
-                        ))
+                        chunks.append({
+                            "chunk_index": len(chunks),
+                            "content": sub_content,
+                            "label": f"{title} - 部分{j//max_chunk_size+1}",
+                            "char_interval": {
+                                "start_pos": chapter_start + j,
+                                "end_pos": chapter_start + j + len(sub_content)
+                            },
+                            "source_text": full_content  # 🆕 传递完整原文
+                        })
 
+            logger.info(f"   📖 完整原文长度: {len(full_content)} 字符")
             return chunks
 
         except Exception as e:
@@ -474,7 +666,7 @@ type: book-graph
             "core_concepts": [],
             "key_insights": [],
             "key_cases": [],
-            "key_quotes": [],
+            "golden_quotes": [],  # 🔑 使用规范化的字段名
             "critical_analysis": {
                 "core_doubts": [],
                 "feminist_perspective": "",
@@ -489,16 +681,111 @@ type: book-graph
         for result in skill_results:
             if result.success and result.result:
                 field_mapping = {
+                    "background": "time_background",
                     "chapter": "chapter_summaries",
                     "concept": "core_concepts",
                     "insight": "key_insights",
                     "case": "key_cases",
-                    "quote": "key_quotes"
+                    "quote": "golden_quotes",  # 🔑 使用规范化的字段名
+                    "critical": "critical_analysis"
                 }
 
                 field = field_mapping.get(result.skill_name)
                 if field and field in result.result:
                     merged_data[field] = result.result[field]
+
+        # ═══════════════════════════════════════════════════════════
+        # 🔧 后处理：提取作者、聚合关联书籍、生成学习路径
+        # ═══════════════════════════════════════════════════════════
+
+        # 1️⃣ 提取作者信息（从 background skill）
+        for result in skill_results:
+            if result.skill_name == "background" and result.result:
+                bg_data = result.result.get("time_background", {})
+                # 提取作者姓名（从微观背景开头）
+                # 格式1: "作者XXX（英文名）是..."
+                # 格式2: "作者XXX是..."
+                micro = bg_data.get("micro_background", "")
+                author_match = re.search(r'作者([^（]+?)(?:（[^）]+）)?[是为]', micro)
+                if author_match:
+                    merged_data["metadata"]["author"] = author_match.group(1).strip()
+                    logger.info(f"   ✅ 提取作者: {merged_data['metadata']['author']}")
+
+                # 提取作者简介
+                author_intro = result.result.get("author_intro", "")
+                if author_intro and len(author_intro) > 20:
+                    merged_data["metadata"]["author_intro"] = author_intro
+
+        # 2️⃣ 聚合关联书籍（从所有 Skill 的 related_books）
+        book_network = {}
+        for result in skill_results:
+            if result.success and result.result:
+                # 遍历 result 中的所有列表字段
+                for field_name, field_value in result.result.items():
+                    if isinstance(field_value, list):
+                        for item in field_value:
+                            if isinstance(item, dict):
+                                related = item.get("related_books", [])
+                                # 处理字符串格式
+                                if isinstance(related, str):
+                                    related = [b.strip() for b in related.replace("，", ",").split(",") if b.strip()]
+                                # 处理列表格式
+                                if isinstance(related, list):
+                                    for book in related:
+                                        if book and book not in book_network:
+                                            book_network[book] = f"在{result.skill_name}中被提及"
+                                        elif book:
+                                            # 多次提及，追加来源
+                                            if result.skill_name not in book_network[book]:
+                                                book_network[book] += f", {result.skill_name}"
+
+        merged_data["book_network"] = book_network
+        if book_network:
+            logger.info(f"   ✅ 聚合关联书籍: {len(book_network)} 本")
+
+        # 3️⃣ 生成学习路径（基于章节和概念）
+        learning_path = {
+            "beginner": [],
+            "intermediate": [],
+            "advanced": [],
+            "practice": []
+        }
+
+        # 初学者：按章节顺序
+        chapters = merged_data.get("chapter_summaries", [])
+        if chapters:
+            for ch in chapters[:3]:
+                title = ch.get("title", "")
+                if title:
+                    learning_path["beginner"].append(f"阅读「{title}」，理解基础概念")
+
+        # 进阶：核心概念深化
+        concepts = merged_data.get("core_concepts", [])
+        if concepts:
+            for c in concepts[:3]:
+                name = c.get("name", "")
+                if name:
+                    learning_path["intermediate"].append(f"深入理解「{name}」的定义与底层逻辑")
+
+        # 深度研究：关键洞见批判
+        insights = merged_data.get("key_insights", [])
+        if insights:
+            for ins in insights[:2]:
+                title = ins.get("title", "")
+                if title:
+                    learning_path["advanced"].append(f"批判性审视「{title}」的多维视角")
+
+        # 实践应用：案例迁移
+        cases = merged_data.get("key_cases", [])
+        if cases:
+            for cas in cases[:2]:
+                name = cas.get("name", "")
+                if name:
+                    learning_path["practice"].append(f"分析「{name}」案例，迁移应用经验")
+
+        merged_data["learning_path"] = learning_path
+        if any(learning_path.values()):
+            logger.info(f"   ✅ 生成学习路径: {sum(len(v) for v in learning_path.values())} 条建议")
 
         # 构建 BookGraph 对象
         try:
@@ -574,19 +861,40 @@ type: book-graph
             # 构建 cases
             cases = []
             for cas in merged_data.get("key_cases", []):
+                # 🔑 处理简化格式：字符串转换为列表
+                stages_raw = cas.get("development_stages", [])
+                if isinstance(stages_raw, str):
+                    # 字符串格式 → 转换为字典列表
+                    stages_list = []
+                    for stage_str in stages_raw.split(";"):
+                        stage_str = stage_str.strip()
+                        if stage_str:
+                            stages_list.append({"name": stage_str[:20], "description": stage_str})
+                    stages_raw = stages_list
+
+                drivers_raw = cas.get("core_drivers", [])
+                if isinstance(drivers_raw, str):
+                    # 字符串格式 → 转换为列表
+                    drivers_raw = [d.strip() for d in drivers_raw.split(",") if d.strip()]
+
+                books_raw = cas.get("related_books", [])
+                if isinstance(books_raw, str):
+                    # 字符串格式 → 转换为列表
+                    books_raw = [b.strip() for b in books_raw.split(",") if b.strip()]
+
                 cases.append(KeyCase(
                     name=cas.get("name", ""),
                     source_chapter=cas.get("source_chapter", ""),
                     event_description=cas.get("event_description", ""),
-                    development_stages=cas.get("development_stages", []),
-                    core_drivers=cas.get("core_drivers", []),
-                    related_books=cas.get("related_books", []),
+                    development_stages=stages_raw,
+                    core_drivers=drivers_raw,
+                    related_books=books_raw,
                     historical_limitations=cas.get("historical_limitations", "")
                 ))
 
             # 构建 quotes
             quotes = []
-            for q in merged_data.get("key_quotes", []):
+            for q in merged_data.get("golden_quotes", []):  # 🔑 使用规范化的字段名
                 quotes.append(KeyQuote(
                     text=q.get("text", ""),
                     chapter=q.get("chapter", ""),

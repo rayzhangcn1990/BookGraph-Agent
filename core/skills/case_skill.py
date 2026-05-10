@@ -37,17 +37,17 @@ class CaseSkill(BaseSkill):
 {chunk_content}
 
 【输出格式 - 必须严格遵循】
-{{  "key_cases": [    {{      "name": "案例名称",      "source_chapter": "来源章节",      "event_description": "事件描述（详细具体）",      "development_stages": [        {{          "name": "阶段名称",          "description": "阶段描述"        }}      ],      "core_drivers": ["核心动力1", "核心动力2"],      "related_books": ["关联书籍"],      "historical_limitations": "历史局限性分析"    }}  ]
+{{  "key_cases": [    {{      "name": "案例名称",      "source_chapter": "来源章节",      "event_description": "事件描述（详细，不少于50字）",      "development_stages": "发展阶段描述（单行文本，用分号分隔）",      "core_drivers": "核心动力（用逗号分隔）",      "related_books": "关联书籍（用逗号分隔）",      "historical_limitations": "历史局限性分析（不少于20字）"    }}  ]
 }}
 
 【核心约束 - 最高优先级】
-1. **案例质量**：
-   - 案例必须是书中具体提及的历史事件、研究案例或典型案例
-   - 事件描述必须详细，不能是概述
+1. **简化格式**：
+   - 发展阶段和核心动力使用单行文本格式，不要用嵌套数组
+   - 用分号或逗号分隔多个项目
 
-2. **发展阶段**：
-   - 案例应包含至少2个发展阶段
-   - 每个阶段需有描述
+2. **案例质量**：
+   - 案例必须是书中具体提及的历史事件、研究案例或典型案例
+   - 事件描述必须详细具体
 
 3. **历史局限**：
    - 必须分析案例的历史局限性
@@ -87,7 +87,11 @@ class CaseSkill(BaseSkill):
 
         return len(errors) == 0, errors
 
-    def generate_markdown(self, result: Dict) -> str:
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List = None  # 🆕 兼容参数
+    ) -> str:
         """生成案例 Markdown"""
         lines = []
 
@@ -104,8 +108,9 @@ class CaseSkill(BaseSkill):
             name = case.get("name", "未命名案例")
             source = case.get("source_chapter", "")
             desc = case.get("event_description", "")
-            stages = case.get("development_stages", [])
-            drivers = case.get("core_drivers", [])
+            # 🔑 处理简化格式：字符串而非数组
+            stages_str = case.get("development_stages", "")
+            drivers_str = case.get("core_drivers", "")
             limitations = case.get("historical_limitations", "")
 
             lines.append(f"### {name}")
@@ -115,18 +120,19 @@ class CaseSkill(BaseSkill):
             lines.append(f"> {desc}")
             lines.append("")
 
-            if stages:
+            # 发展阶段（分号分隔）
+            if stages_str:
                 lines.append("**发展阶段**：")
                 lines.append("```")
+                stages = stages_str.split(";")
                 for j, stage in enumerate(stages, 1):
-                    s_name = stage.get("name", f"阶段{j}")
-                    s_desc = stage.get("description", "")
-                    lines.append(f"{j}. {s_name}: {s_desc}")
+                    lines.append(f"{j}. {stage.strip()}")
                 lines.append("```")
                 lines.append("")
 
-            if drivers:
-                lines.append(f"**核心动力**：{', '.join(drivers)}")
+            # 核心动力（逗号分隔）
+            if drivers_str:
+                lines.append(f"**核心动力**：{drivers_str}")
                 lines.append("")
 
             if limitations:
