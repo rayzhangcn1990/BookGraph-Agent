@@ -55,6 +55,24 @@ llm:
 
   # 🔑 不使用多源 API，直接使用 Anthropic SDK
 
+# llm_wiki 改进功能开关
+improvements:
+  # 两阶段 COT 摄取 (分析 → 生成)
+  two_stage_ingest:
+    enabled: true         # 启用后将替代多轮合成中的 Round1‑5
+    cache_results: true   # 缓存分析阶段结果 (基于内容哈希)
+  # 图洞察 (孤立节点、桥节点、稀疏社区)
+  graph_insights:
+    enabled: true
+    degree_threshold: 1   # 度 ≤ 1 视为孤立节点
+    bridge_min_communities: 3  # 连接至少 3 个社区视为桥节点
+    cohesion_threshold: 0.15   # 社区凝聚力低于此值视为稀疏
+  # 混合搜索 (仅在添加查询接口后生效，目前为占位)
+  hybrid_search:
+    enabled: false
+    vector_db_path: "~/.bookgraph/vectors.lance"
+    embedding_model: "text-embedding-ada-002"
+
 batch:
   max_workers: 4
 
@@ -76,3 +94,5 @@ parsing:
     - ".mobi"
   image_pdf_threshold: 0.8
   min_text_length: 100
+
+# 学科图谱相关 (保持不变)

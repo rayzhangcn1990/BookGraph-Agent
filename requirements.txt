@@ -41,3 +41,9 @@ langdetect==1.0.9
 
 # 日志
 loguru==0.7.2
+# Optional dependencies for llm_wiki improvements
+lancedb>=0.6.0
+networkx>=3.0
+python-louvain>=0.16
+openai>=1.0.0
+python-Levenshtein>=0.20.0

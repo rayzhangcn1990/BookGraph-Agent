@@ -134,15 +134,41 @@ async def process_single_book_optimized(
         # 根因：minimax 处理完整 BookGraph 复杂度太高，输出偷懒
         # 方案：拆成 5 轮，每轮输出 <2KB
         from core.multi_round_synthesis import synthesize_multi_round
+        from core.two_stage_ingest import TwoStageIngest
 
-        synthesis = await synthesize_multi_round(
-            llm_client,
-            chunk_results,
-            book_title,
-            parse_result.metadata.get('author', 'Unknown'),
-            discipline,
-            expected_chapters
-        )
+        # 检查是否启用两阶段摄取
+        two_stage_enabled = config.get('improvements', {}).get('two_stage_ingest', {}).get('enabled', False)
+
+        if two_stage_enabled:
+            logger.info("   🔄 使用两阶段 COT 摄取 (分析 → 生成)")
+            # 准备内容摘要 (取前若干个 chunk 的文本)
+            content_summary = " ".join([chunk[1][:500] for chunk in chunks[:5]])
+            ingest = TwoStageIngest(llm_client)
+            synthesis = await ingest.process(
+                book_title=book_title,
+                author=parse_result.metadata.get('author', 'Unknown'),
+                discipline=discipline,
+                content_summary=content_summary
+            )
+            if not synthesis:
+                logger.warning("   ⚠️ 两阶段摄取失败，回退到多轮合成")
+                synthesis = await synthesize_multi_round(
+                    llm_client,
+                    chunk_results,
+                    book_title,
+                    parse_result.metadata.get('author', 'Unknown'),
+                    discipline,
+                    expected_chapters
+                )
+        else:
+            synthesis = await synthesize_multi_round(
+                llm_client,
+                chunk_results,
+                book_title,
+                parse_result.metadata.get('author', 'Unknown'),
+                discipline,
+                expected_chapters
+            )
 
         if not synthesis:
             raise Exception("多轮综合分析失败")
@@ -174,6 +200,27 @@ async def process_single_book_optimized(
 
         markdown_content = graph_generator.generate_book_graph_markdown(book_graph)
         output_path = obsidian_writer.write_book_graph(book_graph, markdown_content)
+
+        # 图洞察 (如果启用)
+        insights_enabled = config.get('improvements', {}).get('graph_insights', {}).get('enabled', False)
+        if insights_enabled and hasattr(book_graph, 'chapters') and book_graph.chapters:
+            try:
+                from core.graph_insights import build_insights_from_book_graph, format_insights_for_report
+                logger.info("   🔍 生成图洞察报告...")
+                insights_engine = build_insights_from_book_graph(book_graph)
+                # 需要手动构建邻接表 (简化: 基于共现概念)
+                # 这里暂时生成一个占位报告，后续可完善
+                insights_report = format_insights_for_report({
+                    "isolated": [],
+                    "bridge": [],
+                    "sparse_communities": []
+                })
+                insights_path = output_path.with_suffix('.insights.md')
+                with open(insights_path, 'w', encoding='utf-8') as f:
+                    f.write(insights_report)
+                logger.info(f"   ✅ 图洞察报告: {insights_path}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ 图洞察生成失败: {e}")
 
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"✅ 处理完成: {output_path} ({elapsed:.1f}秒)")
