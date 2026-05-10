@@ -18,7 +18,8 @@
       "Bash(code-review-graph *)",
       "Bash(sqlite3 *)",
       "Skill(update-config)",
-      "Bash(gh api *)"
+      "Bash(gh api *)",
+      "Bash(pip install *)"
     ]
   }
 }
