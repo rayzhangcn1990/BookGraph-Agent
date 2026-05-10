@@ -23,11 +23,17 @@ class ParseResult:
     page_count: int = 0
     word_count: int = 0
 
+    # 🆕 新增：完整原文保存（用于源文本对齐）
+    full_content: str = ""  # 保存合并后的完整原文
+    chapter_positions: List[Dict] = None  # 每章在原文中的位置
+
     def __post_init__(self):
         if self.chapters is None:
             self.chapters = []
         if self.metadata is None:
             self.metadata = {}
+        if self.chapter_positions is None:
+            self.chapter_positions = []
 
 
 class BaseParser(ABC):
@@ -138,43 +144,58 @@ class BaseParser(ABC):
         return text.strip()
 
     def chunk_content(
-        self, 
-        content: str, 
-        chunk_size: int = 50000, 
+        self,
+        content: str,
+        chunk_size: int = 50000,
         overlap_size: int = 2000
     ) -> List[Dict]:
         """
         按照配置分块，保持章节完整性
-        
+
+        🆕 改造：返回的每个 chunk 包含 char_interval（字符位置区间）
+
         Args:
             content: 完整内容
             chunk_size: 每块最大字符数
             overlap_size: 块间重叠字符数
-            
+
         Returns:
-            List[Dict]: 分块列表，每块包含{chunk_index, content, start_chapter, end_chapter}
+            List[Dict]: 分块列表，每块包含：
+                - chunk_index: 序号
+                - content: 内容
+                - char_interval: {start_pos, end_pos} 在原文中的位置
+                - total_chunks: 总块数
         """
         if not content:
             return []
-        
+
         if len(content) <= chunk_size:
-            return [{"chunk_index": 0, "content": content, "total_chunks": 1}]
-        
+            return [{
+                "chunk_index": 0,
+                "content": content,
+                "char_interval": {"start_pos": 0, "end_pos": len(content)},
+                "total_chunks": 1
+            }]
+
         chunks = []
         current_pos = 0
         chunk_index = 0
-        
+
         while current_pos < len(content):
             # 计算当前块的结束位置
             end_pos = min(current_pos + chunk_size, len(content))
-            
+
+            # 记录原始位置（用于对齐）
+            original_start = current_pos
+            original_end = end_pos
+
             # 如果不是最后一块，尝试在章节边界处切断
             if end_pos < len(content):
                 # 在重叠区域内寻找最近的章节标记
                 search_start = max(current_pos, end_pos - overlap_size * 2)
                 search_end = min(end_pos + overlap_size, len(content))
                 search_region = content[search_start:search_end]
-                
+
                 # 寻找章节标记（### 或 第 X 章）
                 chapter_patterns = [
                     r'\n#{1,3}\s+',
@@ -182,7 +203,7 @@ class BaseParser(ABC):
                     r'\nChapter\s+\d+',
                     r'\nPART\s+[IVX\d]+',
                 ]
-                
+
                 best_cut = None
                 for pattern in chapter_patterns:
                     matches = list(re.finditer(pattern, search_region, re.IGNORECASE))
@@ -193,32 +214,40 @@ class BaseParser(ABC):
                             if cut_pos > current_pos + chunk_size // 2:
                                 best_cut = cut_pos
                                 break
-                
+
                 if best_cut:
                     end_pos = best_cut
-            
+                    original_end = end_pos
+
             # 提取当前块
-            chunk_content = content[current_pos:end_pos]
-            
-            # 如果不是第一块，添加重叠部分
+            chunk_content_str = content[current_pos:end_pos]
+
+            # 如果不是第一块，添加重叠部分（但 char_interval 仍记录原始位置）
             if chunk_index > 0 and overlap_size > 0:
                 overlap_start = max(0, current_pos - overlap_size)
                 overlap = content[overlap_start:current_pos]
-                chunk_content = overlap + chunk_content
-            
+                chunk_content_str = overlap + chunk_content_str
+                # 🔑 注意：重叠部分的位置信息需要调整
+                # 实际内容从 overlap_start 开始，但 original_start 仍记录有效内容起点
+
             chunks.append({
                 "chunk_index": chunk_index,
-                "content": chunk_content,
+                "content": chunk_content_str,
+                # 🆕 位置信息
+                "char_interval": {
+                    "start_pos": overlap_start if chunk_index > 0 and overlap_size > 0 else original_start,
+                    "end_pos": original_end
+                },
             })
-            
+
             current_pos = end_pos
             chunk_index += 1
-        
+
         # 更新总块数
         total = len(chunks)
         for chunk in chunks:
             chunk["total_chunks"] = total
-        
+
         return chunks
 
     def is_image_heavy(self, content: str) -> bool:

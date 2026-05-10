@@ -102,8 +102,16 @@ class ConceptSkill(BaseSkill):
 
         return len(errors) == 0, errors
 
-    def generate_markdown(self, result: Dict) -> str:
-        """生成概念 Markdown"""
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List = None  # 🆕 新增参数（兼容 abstractmethod）
+    ) -> str:
+        """
+        生成概念 Markdown
+
+        🆕 改造：使用 extractions 显示位置引用
+        """
         lines = []
 
         concepts = result.get("core_concepts", [])
@@ -116,6 +124,13 @@ class ConceptSkill(BaseSkill):
                 lines.append(f"> 错误: {', '.join(errors)}")
             return "\n".join(lines)
 
+        # 🆕 构建 extraction 位置映射（用于显示引用）
+        extraction_refs = {}
+        if extractions:
+            for ext in extractions:
+                if hasattr(ext, 'extraction_text') and hasattr(ext, 'to_markdown_ref'):
+                    extraction_refs[ext.extraction_text] = ext.to_markdown_ref()
+
         for concept in concepts:
             name = concept.get("name", "未命名概念")
             definition = self._clean_content(concept.get("definition", ""))
@@ -126,10 +141,15 @@ class ConceptSkill(BaseSkill):
             critical = self._clean_content(concept.get("critical_review", ""))
             related = concept.get("related_books", [])
 
-            lines.append(f"### {name}")
+            # 🆕 尝试获取概念名称的位置引用
+            name_ref = extraction_refs.get(name, name)
+
+            lines.append(f"### {name_ref}")
             lines.append("")
             lines.append(f"> [!abstract] 定义")
-            lines.append(f"> {definition}")
+            # 🆕 尝试获取定义文本的位置引用
+            def_ref = extraction_refs.get(definition[:20], definition) if definition and len(definition) > 20 else definition
+            lines.append(f"> {def_ref}")
             lines.append("")
 
             if deep_meaning:
@@ -201,8 +221,31 @@ class ConceptSkill(BaseSkill):
                 return True
         return False
 
-    def _clean_content(self, content: str) -> str:
-        """清理内容"""
+    def _clean_content(self, content) -> str:
+        """清理内容（兼容字典和字符串类型）"""
         if not content:
             return ""
-        return content.strip()
+
+        # 🔑 处理字典类型（可能是LLM返回的非预期格式）
+        if isinstance(content, dict):
+            # 尝试提取字典中的关键值
+            if "text" in content:
+                return str(content["text"]).strip()
+            if "content" in content:
+                return str(content["content"]).strip()
+            if "definition" in content:
+                return str(content["definition"]).strip()
+            # 无关键值，转为字符串表示
+            return str(content)[:200]
+
+        # 正常字符串处理
+        if isinstance(content, str):
+            # 移除占位符
+            placeholders = ["待分析", "待补充", "TBD", "TODO", "N/A"]
+            for ph in placeholders:
+                if content.strip() == ph:
+                    return ""
+            return content.strip()
+
+        # 其他类型转为字符串
+        return str(content)[:200]

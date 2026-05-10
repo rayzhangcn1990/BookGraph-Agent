@@ -142,12 +142,24 @@ REQUIRED_FIELDS = {
         "chapters",
         "core_concepts",
     ],
+    # 🔑 新增：多轮 synthesis 各 round 的必要字段
+    "synthesis_round_1": ["metadata", "time_background"],  # Round 1: 元数据 + 背景
+    "synthesis_round_2": ["chapters"],  # Round 2: 章节 1-10
+    "synthesis_round_3": ["chapters"],  # Round 3: 章节 11-20
+    "synthesis_round_4": ["chapters", "core_concepts"],  # Round 4: 章节 21+ + 核心概念
+    "synthesis_round_5": ["key_insights", "key_cases", "key_quotes"],  # Round 5: 洞见 + 案例 + 金句
 }
 
 # 🔑 新增：强制字段（必须存在，不能缺失）
 MANDATORY_FIELDS = {
     "chunk_analysis": ["chapter_summaries"],  # 每个chunk必须输出章节信息
     "synthesis": ["metadata", "chapters", "core_concepts"],
+    # 🔑 新增：多轮 synthesis 的强制字段
+    "synthesis_round_1": ["metadata"],
+    "synthesis_round_2": ["chapters"],
+    "synthesis_round_3": ["chapters"],
+    "synthesis_round_4": ["chapters"],
+    "synthesis_round_5": ["key_insights"],
 }
 
 # ═══════════════════════════════════════════════════════════
@@ -312,6 +324,11 @@ def repair_truncated_json(json_str: str) -> str:
     json_str = re.sub(r'^```\s*', '', json_str)
     json_str = re.sub(r'\s*```$', '', json_str)
 
+    # 🔑 新增 Step 0.1: 移除注释行（以 # 开头的行）
+    lines = json_str.split('\n')
+    non_comment_lines = [line for line in lines if not line.strip().startswith('#')]
+    json_str = '\n'.join(non_comment_lines).strip()
+
     # 🔑 新增 Step 0.5: 移除 JSON 注释（LLM经常添加 // 注释）
     # 移除单行注释 // ...（但不移除URL中的//，如 https://）
     json_str = re.sub(r'(?<!:)//[^\n]*', '', json_str)
@@ -326,6 +343,71 @@ def repair_truncated_json(json_str: str) -> str:
 
     # 🔑 清理多余的逗号（逗号后面是 ] 或 }）
     json_str = re.sub(r',(\s*[\]\}])', r'\1', json_str)
+
+    # 🔑 新增 Step 0.7: 智能转义字符串值内部的引号
+    # 问题：字符串值内部的引号（无论是中文还是英文）会被JSON解析器误认为字符串结束
+    # 方案：找到字符串值的范围，将内部的引号转义为 \"
+    def escape_internal_quotes(text):
+        """转义JSON字符串值内部的引号"""
+        result = []
+        i = 0
+        in_string = False
+
+        while i < len(text):
+            char = text[i]
+
+            # 检测字符串开始（未转义的引号）
+            if char == '"' and (i == 0 or text[i-1] != '\\'):
+                if not in_string:
+                    # 字符串开始
+                    in_string = True
+                    result.append(char)
+                    i += 1
+                    continue
+                else:
+                    # 检查是否是字符串结束
+                    # 字符串结束条件：后面是逗号、方括号/花括号结束、冒号、空白或换行
+                    remaining = text[i+1:].lstrip()
+                    end_marker = remaining[:1] if remaining else ''
+
+                    if end_marker in ['', ',', ']', '}', ':'] or (i+1 < len(text) and text[i+1] in '\n\r\t '):
+                        # 这是字符串结束引号
+                        in_string = False
+                        result.append(char)
+                        i += 1
+                        continue
+                    else:
+                        # 这是字符串值内部的引号，需要转义
+                        result.append('\\')
+                        result.append(char)
+                        i += 1
+                        continue
+
+            # 其他字符正常处理
+            result.append(char)
+            i += 1
+
+        return ''.join(result)
+
+    json_str = escape_internal_quotes(json_str)
+
+    # 🔑 新增：修复常见的字段格式错误（字符串应该是数组）
+    # 修复 "critical_questions": "问题1", "问题2" → ["问题1", "问题2"]
+    # 匹配模式：字段名后是字符串，然后逗号，然后另一个字符串
+    array_fields_pattern = [
+        ('critical_questions', r'"critical_questions":\s*"([^"]+)",\s*"([^"]+)"'),
+        ('related_books', r'"related_books":\s*"([^"]+)",\s*"([^"]+)"'),
+    ]
+    for field_name, pattern in array_fields_pattern:
+        json_str = re.sub(pattern, f'"{field_name}": ["\\1", "\\2"]', json_str)
+
+    # 🔑 新增：修复字段值是单个字符串但应该是数组的情况
+    # "critical_questions": "问题" → ["问题"]
+    single_string_to_array_fields = ['critical_questions', 'related_books', 'tags', 'category']
+    for field_name in single_string_to_array_fields:
+        pattern = f'"{field_name}":\\s*"([^"\\[\\]]+)"'
+        replacement = f'"{field_name}": ["\\1"]'
+        json_str = re.sub(pattern, replacement, json_str)
 
     # 1. 如果 JSON 以 } 结尾，可能是完整的
     if json_str.rstrip().endswith('}'):

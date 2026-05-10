@@ -90,7 +90,11 @@ class InsightSkill(BaseSkill):
 
         return len(errors) == 0, errors
 
-    def generate_markdown(self, result: Dict) -> str:
+    def generate_markdown(
+        self,
+        result: Dict,
+        extractions: List = None  # 🆕 兼容参数
+    ) -> str:
         """生成洞见 Markdown"""
         lines = []
 

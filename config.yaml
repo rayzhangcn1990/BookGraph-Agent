@@ -31,10 +31,10 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  provider: "nvidia-nim"
-  model: "claude-opus-4.7"  # 🔑 PUA修复：切换到最强模型
-  api_base: "http://localhost:18765/v1"
-  api_key: "unused"
+  provider: "anthropic"
+  model: "deepseek-v4-pro"
+  api_base: "${ANTHROPIC_BASE_URL}"
+  api_key: "${ANTHROPIC_AUTH_TOKEN}"
   max_tokens: 16384
   temperature: 0.3
   chunk_size: 25000
@@ -43,53 +43,17 @@ llm:
   retry_delay: 10
   timeout: 240
 
-  # 模型池配置
+  # 模型池配置（已禁用，直接使用配置的模型）
   model_pool:
-    enabled: true
-    auto_verify: true
+    enabled: false
+    auto_verify: false
     verify_interval: 3600
     min_stability: 0.7
     max_response_time: 30
     min_success_count: 3
     max_consecutive_failures: 3
 
-  # NVIDIA NIM API 可用模型
-  available_models:
-    - model: "nvidia/llama-3.3-nemotron-super-49b-v1"
-      api_base: "${NVIDIA_NIM_API_BASE}"
-      api_key: "${NVIDIA_NIM_API_KEY}"
-      priority: 1
-    - model: "meta/llama-3.1-405b-instruct"
-      api_base: "${NVIDIA_NIM_API_BASE}"
-      api_key: "${NVIDIA_NIM_API_KEY}"
-      priority: 2
-    - model: "qwen/qwen3-coder-480b-a35b-instruct"
-      api_base: "${NVIDIA_NIM_API_BASE}"
-      api_key: "${NVIDIA_NIM_API_KEY}"
-      priority: 3
-
-  api_sources:
-    # 🔑 OpenRouter 免费模型（账户无额度，仅能用免费模型）
-    - name: "openrouter-free"
-      api_base: "https://openrouter.ai/api/v1"
-      api_key: "${OPENROUTER_API_KEY}"
-      priority: 1
-      quota_type: "independent"
-      preferred_models:
-        - "minimax/minimax-m2.5:free"       # ✅ 实测可用
-        - "nousresearch/hermes-3-llama-3.1-405b:free"
-        - "meta-llama/llama-3.3-70b-instruct:free"
-        - "deepseek/deepseek-r1-distill-llama-70b:free"
-
-    # 本地代理备用（NVIDIA模型）
-    - name: "nvidia-nim-local"
-      api_base: "http://localhost:18765/v1"
-      api_key: "unused"
-      priority: 3
-      quota_type: "shared"
-      preferred_models:
-        - "meta/llama-3.1-70b-instruct"
-        - "nvidia/llama-3.3-nemotron-super-49b-v1"
+  # 🔑 不使用多源 API，直接使用 Anthropic SDK
 
 batch:
   max_workers: 4

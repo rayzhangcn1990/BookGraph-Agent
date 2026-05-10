@@ -3,7 +3,22 @@
     "allow": [
       "Bash(python *)",
       "Bash(tmux list-sessions *)",
-      "Bash(kill 37951)"
+      "Bash(kill 37951)",
+      "Bash(python3 *)",
+      "Bash(pip3 install *)",
+      "Bash(code-review-graph install *)",
+      "Bash(code-review-graph build *)",
+      "Bash(code-review-graph status *)",
+      "Bash(code-review-graph visualize *)",
+      "Bash(code-review-graph eval *)",
+      "Bash(code-review-graph serve *)",
+      "Bash(curl -s http://localhost:8000/status)",
+      "Bash(jobs -l)",
+      "Bash(uvx code-review-graph *)",
+      "Bash(code-review-graph *)",
+      "Bash(sqlite3 *)",
+      "Skill(update-config)",
+      "Bash(gh api *)"
     ]
   }
 }
