@@ -222,6 +222,17 @@ async def process_single_book_optimized(
             except Exception as e:
                 logger.warning(f"   ⚠️ 图洞察生成失败: {e}")
 
+        # 摘要层索引 (如果启用)
+        summary_enabled = config.get('improvements', {}).get('summary_index', {}).get('enabled', False)
+        if summary_enabled:
+            try:
+                from core.summary_index import generate_chapter_summary, generate_book_summary
+                output_dir = output_path.parent
+                generate_chapter_summary(book_graph, output_dir)
+                generate_book_summary(book_graph, output_dir)
+            except Exception as e:
+                logger.warning(f"   ⚠️ 摘要索引生成失败: {e}")
+
         elapsed = (datetime.now() - start_time).total_seconds()
         logger.info(f"✅ 处理完成: {output_path} ({elapsed:.1f}秒)")
 

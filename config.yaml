@@ -31,10 +31,11 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  provider: "anthropic"
-  model: "deepseek-v4-pro"
-  api_base: "${ANTHROPIC_BASE_URL}"
-  api_key: "${ANTHROPIC_AUTH_TOKEN}"
+  # 主模型配置（使用本地专用端点）
+  provider: "openai"
+  model: "deepseek-ai/deepseek-v4-pro"
+  api_base: "http://localhost:3001/v1"
+  api_key: "freellmapi-2148be2025c27b01d9096ffb1690241b2ce4e4c6625b244a"
   max_tokens: 16384
   temperature: 0.3
   chunk_size: 25000
@@ -43,15 +44,33 @@ llm:
   retry_delay: 10
   timeout: 240
 
-  # 模型池配置（已禁用，直接使用配置的模型）
+  # 模型池配置
   model_pool:
-    enabled: false
-    auto_verify: false
+    enabled: true
+    auto_verify: true
     verify_interval: 3600
     min_stability: 0.7
     max_response_time: 30
     min_success_count: 3
     max_consecutive_failures: 3
+    # 可用模型列表（从 API 端点自动发现，此处仅指定优先级）
+    models:
+      - model: "deepseek/deepseek-chat"
+        api_base: "https://openrouter.ai/api/v1"
+        api_key: "${OPENROUTER_API_KEY}"
+        priority: 1
+      - model: "nvidia/llama-3.3-nemotron-super-49b-v1"
+        api_base: "https://openrouter.ai/api/v1"
+        api_key: "${OPENROUTER_API_KEY}"
+        priority: 2
+      - model: "tencent/hy3-preview:free"
+        api_base: "https://openrouter.ai/api/v1"
+        api_key: "${OPENROUTER_API_KEY}"
+        priority: 3
+      - model: "minimax/minimax-m2.5:free"
+        api_base: "https://openrouter.ai/api/v1"
+        api_key: "${OPENROUTER_API_KEY}"
+        priority: 4
 
   # 🔑 不使用多源 API，直接使用 Anthropic SDK
 
@@ -64,14 +83,25 @@ improvements:
   # 图洞察 (孤立节点、桥节点、稀疏社区)
   graph_insights:
     enabled: true
-    degree_threshold: 1   # 度 ≤ 1 视为孤立节点
-    bridge_min_communities: 3  # 连接至少 3 个社区视为桥节点
-    cohesion_threshold: 0.15   # 社区凝聚力低于此值视为稀疏
+    degree_threshold: 1
+    bridge_min_communities: 3
+    cohesion_threshold: 0.15
   # 混合搜索 (仅在添加查询接口后生效，目前为占位)
   hybrid_search:
     enabled: false
     vector_db_path: "~/.bookgraph/vectors.lance"
     embedding_model: "text-embedding-ada-002"
+  # 结构化输出 (强制 JSON 输出)
+  structured_output:
+    enabled: false          # 需要安装 instructor 库
+  # 实体消歧 (合并相似概念)
+  entity_resolution:
+    enabled: false
+    model: "BAAI/bge-small-en-v1.5"
+    similarity_threshold: 0.85
+  # 摘要层索引 (生成 _chapter_summary.md 和 _book_summary.md)
+  summary_index:
+    enabled: true
 
 batch:
   max_workers: 4

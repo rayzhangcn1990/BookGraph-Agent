@@ -130,7 +130,7 @@ class BaseSkill(ABC):
                             {"role": "system", "content": self._get_system_prompt()},
                             {"role": "user", "content": prompt}
                         ],
-                        max_tokens=16384
+                        max_tokens=16384,
                     ),
                     timeout=180  # 3分钟超时
                 )

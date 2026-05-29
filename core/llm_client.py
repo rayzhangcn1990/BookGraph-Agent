@@ -255,6 +255,21 @@ class LLMClient:
                 print(f"   API Base: {api_base_env}")
                 return
 
+        # 从 config 直接创建 OpenAI 客户端（provider: openai + api_base + api_key）
+        if OPENAI_AVAILABLE and not self.openai_client and not self.anthropic_client:
+            config_api_base = self.config.get('api_base', '')
+            config_api_key = self.config.get('api_key', '')
+            if config_api_base and config_api_key and config_api_key not in ['', 'unused']:
+                self.openai_client = openai.OpenAI(
+                    api_key=config_api_key,
+                    base_url=config_api_base,
+                    timeout=self.config.get('timeout', 240),
+                )
+                self.provider = 'openai'
+                print(f"✅ OpenAI 客户端初始化成功（模型: {self.model}）")
+                print(f"   API Base: {config_api_base}")
+                return
+
         # 后备：使用 Hermes 内置 LLM
         if not self.openai_client and not self.anthropic_client:
             print(f"⚠️  未配置有效 API，使用 Hermes 内置 LLM")
@@ -982,6 +997,42 @@ class LLMClient:
                                     item['development_stages'][i] = {"name": stage, "description": ""}
                         elif isinstance(item['development_stages'], str):
                             item['development_stages'] = [{"name": item['development_stages'], "description": ""}]
+
+        # 🔑 Step 4: 填充嵌套模型必填字段（LLM 经常遗漏）
+        nested_defaults = {
+            'core_concepts': {
+                'name': '未命名概念', 'definition': '定义待补充', 'deep_meaning': '深层含义待补充',
+                'underlying_logic': '前提假设：[待补充]→推理链条：[待补充]→核心结论：[待补充]',
+                'critical_review': '批判性审视待补充',
+            },
+            'key_insights': {
+                'title': '未命名洞见', 'description': '描述待补充', 'underlying_logic': '底层逻辑待补充',
+                'controversies': '争议待补充',
+            },
+            'key_cases': {
+                'name': '未命名案例', 'source_chapter': '待补充', 'event_description': '描述待补充',
+                'historical_limitations': '历史局限性待补充',
+            },
+            'key_quotes': {
+                'text': '待补充', 'chapter': '待补充', 'core_theme': '待补充',
+                'background_context': '待补充', 'underlying_logic': '待补充',
+            },
+        }
+        for section, defaults in nested_defaults.items():
+            if section in data and isinstance(data[section], list):
+                for i, item in enumerate(data[section]):
+                    if isinstance(item, str):
+                        # 字符串 → dict 转换（使用字符串作为标题/名称）
+                        data[section][i] = {**defaults, 'title': item, 'name': item, 'text': item}
+                    elif isinstance(item, dict):
+                        for field, default in defaults.items():
+                            item.setdefault(field, default)
+
+        # 确保 critical_analysis 子字段有值
+        if 'critical_analysis' in data and isinstance(data['critical_analysis'], dict):
+            ca = data['critical_analysis']
+            ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
+            ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
 
         # 处理 learning_path（应该是对象，各字段为数组，LLM 可能返回字符串）
         if 'learning_path' not in data:

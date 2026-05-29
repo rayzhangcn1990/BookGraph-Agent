@@ -54,6 +54,9 @@ class OptimizedChunkProcessor:
         # 智能重试配置
         self.retry_delays = [30, 60, 90]  # 指数退避（秒）
         self.max_retries = 3
+        # 动态限流追踪
+        self._consecutive_rate_limits = 0
+        self._current_max_parallel = max_parallel
 
     async def process_single_chunk(
         self,
@@ -143,10 +146,23 @@ class OptimizedChunkProcessor:
             except Exception as e:
                 # 异常处理
                 error_str = str(e)
+                error_lower = error_str.lower()
 
                 # 限流处理（429）
-                if '429' in error_str or 'throttling' in error_str.lower() or 'rate limit' in error_str.lower():
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2  # 限流等待加倍
+                if '429' in error_str or 'throttling' in error_lower or 'rate limit' in error_lower:
+                    self._consecutive_rate_limits += 1
+                    # 动态降低并发度
+                    if self._consecutive_rate_limits > 3 and self._current_max_parallel > 1:
+                        self._current_max_parallel = max(1, self._current_max_parallel // 2)
+                        logger.warning(f"   ⚠️ 检测到持续限流，降低最大并发至 {self._current_max_parallel}")
+                        # 更新信号量（将在下次 process_chunks_parallel 重新创建）
+                    # 指数退避，并尝试解析 Retry-After
+                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2
+                    # 尝试从错误消息中提取等待秒数
+                    import re
+                    match = re.search(r'retry after (\d+)', error_str)
+                    if match:
+                        delay = int(match.group(1))
                     logger.warning(f"   ⚠️ Chunk {chunk_index} 限流，{delay}秒后重试")
                     await asyncio.sleep(delay)
                     continue
@@ -213,10 +229,12 @@ class OptimizedChunkProcessor:
         Returns:
             List[ChunkResult]: 所有处理结果
         """
-        logger.info(f"🚀 并行处理 {len(chunks)} 个 chunks（最大并行数: {self.max_parallel})")
+        # 使用当前有效的最大并行数（可能因限流动态降低）
+        effective_max = self._current_max_parallel
+        logger.info(f"🚀 并行处理 {len(chunks)} 个 chunks（最大并行数: {effective_max})")
 
         # 使用 semaphore 控制并发
-        semaphore = asyncio.Semaphore(self.max_parallel)
+        semaphore = asyncio.Semaphore(effective_max)
 
         async def process_with_semaphore(chunk):
             async with semaphore:
