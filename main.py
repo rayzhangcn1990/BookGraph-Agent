@@ -300,47 +300,100 @@ async def process_single_book_optimized(
 
 def _semantic_chunking(parse_result, config: Dict) -> List:
     """
-    语义分块（基于章节结构）
+    语义分块 v2：按 Markdown 标题层级切分
+
+    解决 LLM "中间迷失" 问题：
+    - 原方案：chunk_size=30000 字符（约 7500 token）
+    - 新方案：按 ## 标题切分，目标 2000-5000 token/chunk
+
+    规则：
+    - 每个 ## 标题作为一个独立 chunk
+    - 过大章节按 ### 子标题再切分
+    - 确保 LLM 能完整理解每个小节
 
     Args:
-        parse_result: 解析结果
+        parse_result: 解析结果（包含 Markdown 内容）
         config: 配置
 
     Returns:
         List: chunks [(index, content, label)]
     """
-    max_chunk_size = config.get('llm', {}).get('chunk_size', 30000)
+    content = parse_result.content
+
+    # 🔑 新配置：基于 token 数而非字符数
+    # 默认 4000 token（约 16000 字符）
+    max_chunk_tokens = config.get('llm', {}).get('chunk_tokens', 4000)
+    max_chunk_chars = max_chunk_tokens * 4  # 粗略估算
+
     chunks = []
 
-    if parse_result.chapters and len(parse_result.chapters) > 1:
-        # 有章节结构：按章节分块
-        for i, chapter in enumerate(parse_result.chapters):
-            content = chapter.get("content", "")
-            title = chapter.get("title", f"第{i+1}章")
+    # 🔑 检查是否有 Markdown 标题结构（Docling 输出）
+    has_markdown_headers = bool(re.search(r'^#{1,3}\s+', content, re.MULTILINE))
 
-            if len(content) <= max_chunk_size:
-                chunks.append((len(chunks), content, f"[{title}]"))
+    if has_markdown_headers and parse_result.chapters and len(parse_result.chapters) > 1:
+        # 有 Markdown 章节结构：按标题切分
+        logger.info(f"   📑 使用 Markdown 标题分块（目标: {max_chunk_tokens} token）")
+
+        for i, chapter in enumerate(parse_result.chapters):
+            chapter_content = chapter.get("content", "")
+            chapter_title = chapter.get("title", f"第{i+1}章")
+
+            # 按 ## 标题切分章节内容
+            sections = re.split(r'\n(?=## )', chapter_content)
+
+            for j, section in enumerate(sections):
+                # 估算 token 数（~4 字符/token）
+                estimated_tokens = len(section) // 4
+
+                if estimated_tokens <= max_chunk_tokens:
+                    # 单个小节
+                    label = f"[{chapter_title}]" if j == 0 else f"[{chapter_title} - Section {j+1}]"
+                    chunks.append((len(chunks), section.strip(), label))
+                else:
+                    # 过大章节：按 ### 子标题再切分
+                    subsections = re.split(r'\n(?=### )', section)
+
+                    for k, sub in enumerate(subsections):
+                        sub_label = f"[{chapter_title} - Section {j+1}.{k+1}]"
+                        chunks.append((len(chunks), sub.strip(), sub_label))
+
+    elif parse_result.chapters and len(parse_result.chapters) > 1:
+        # 有章节结构但无 Markdown 标题：按章节分块（旧逻辑）
+        logger.info(f"   📖 使用章节结构分块")
+
+        for i, chapter in enumerate(parse_result.chapters):
+            chapter_content = chapter.get("content", "")
+            chapter_title = chapter.get("title", f"第{i+1}章")
+
+            if len(chapter_content) <= max_chunk_chars:
+                chunks.append((len(chunks), chapter_content, f"[{chapter_title}]"))
             else:
                 # 大章节按段落分割
-                paragraphs = content.split("\n\n")
+                paragraphs = chapter_content.split("\n\n")
                 current_chunk = ""
 
                 for para in paragraphs:
-                    if len(current_chunk) + len(para) <= max_chunk_size:
+                    if len(current_chunk) + len(para) <= max_chunk_chars:
                         current_chunk += para + "\n\n"
                     else:
                         if current_chunk:
-                            chunks.append((len(chunks), current_chunk, f"[{title} - 部分]"))
+                            chunks.append((len(chunks), current_chunk, f"[{chapter_title} - 部分]"))
                         current_chunk = para + "\n\n"
 
                 if current_chunk:
-                    chunks.append((len(chunks), current_chunk, f"[{title} - 部分]"))
+                    chunks.append((len(chunks), current_chunk, f"[{chapter_title} - 部分]"))
+
     else:
-        # 无章节结构：按字符分块
-        full_content = parse_result.content
-        for i in range(0, len(full_content), max_chunk_size):
-            chunk_content = full_content[i:i+max_chunk_size]
+        # 无章节结构：按字符分块（回退方案）
+        logger.info(f"   ⚠️ 无章节结构，按字符分块")
+
+        for i in range(0, len(content), max_chunk_chars):
+            chunk_content = content[i:i+max_chunk_chars]
             chunks.append((len(chunks), chunk_content, f"[块{len(chunks)+1}]"))
+
+    # 🔑 统计
+    avg_tokens = sum(len(c[1]) // 4 for c in chunks) / len(chunks) if chunks else 0
+    logger.info(f"   📊 分块完成: {len(chunks)} 块，平均 {int(avg_tokens)} token")
 
     return chunks
 

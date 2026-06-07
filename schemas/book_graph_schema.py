@@ -159,3 +159,64 @@ class BookGraph(BaseModel):
                 }
             }
         }
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 4: JSON Schema 导出（用于 LLM 强制结构化输出）
+# ═══════════════════════════════════════════════════════════
+
+def get_book_graph_json_schema() -> Dict[str, Any]:
+    """
+    获取 BookGraph 的 JSON Schema
+
+    用于 OpenAI response_format={"type": "json_schema", "json_schema": {...}}
+
+    Returns:
+        Dict: JSON Schema 字典
+    """
+    return BookGraph.model_json_schema()
+
+
+# 预生成的 JSON Schema（避免重复计算）
+BOOK_GRAPH_JSON_SCHEMA = get_book_graph_json_schema()
+
+
+def get_chunk_analysis_json_schema() -> Dict[str, Any]:
+    """
+    获取 Chunk 分析结果的 JSON Schema
+
+    用于 chunk 阶段的强制结构化输出
+
+    Returns:
+        Dict: JSON Schema 字典
+    """
+    from pydantic import BaseModel
+    from typing import List
+
+    class ChunkAnalysisResult(BaseModel):
+        """Chunk 分析结果结构"""
+        chapter_summaries: List[Dict[str, Any]] = Field(
+            default_factory=list,
+            description="章节摘要列表"
+        )
+        core_concepts: List[Dict[str, Any]] = Field(
+            default_factory=list,
+            description="核心概念列表"
+        )
+        key_insights: List[Dict[str, Any]] = Field(
+            default_factory=list,
+            description="关键洞见列表"
+        )
+        key_cases: List[Dict[str, Any]] = Field(
+            default_factory=list,
+            description="关键案例列表"
+        )
+        key_quotes: List[Dict[str, Any]] = Field(
+            default_factory=list,
+            description="金句列表"
+        )
+
+    return ChunkAnalysisResult.model_json_schema()
+
+
+CHUNK_ANALYSIS_JSON_SCHEMA = get_chunk_analysis_json_schema()

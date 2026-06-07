@@ -10,10 +10,15 @@ mobi==0.3.3
 beautifulsoup4==4.12.2
 lxml==4.9.3
 
-# OCR
+# 高性能文档解析（替代 PaddleOCR）
+# Docling：比 PaddleOCR 快 5-10x，输出结构化 Markdown
+# 安装：pip install docling
+# docling>=2.0.0  # 可选依赖，取消注释启用
+
+# OCR（回退方案，Docling 不可用时使用）
 pytesseract==0.3.10
-paddlepaddle==2.5.2
-paddleocr==2.7.0
+# paddlepaddle==2.5.2  # 已移除，使用 Docling 替代
+# paddleocr==2.7.0     # 已移除，使用 Docling 替代
 Pillow==10.1.0
 opencv-python==4.8.1.78
 

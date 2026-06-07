@@ -38,7 +38,9 @@ llm:
   api_key: "${FREELLMAPI_KEY}"  # 从环境变量读取，避免硬编码
   max_tokens: 8192
   temperature: 0.3
-  chunk_size: 5000
+  # 🔑 语义分块配置（替代死板的 chunk_size）
+  chunk_tokens: 4000      # 目标 token 数（约 16000 字符）
+  chunk_size: 30000       # 回退：无章节结构时的字符数
   merge_threshold: 3000
   max_retries: 5
   retry_delay: 10

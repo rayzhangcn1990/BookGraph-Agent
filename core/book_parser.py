@@ -2,8 +2,10 @@
 Book Parser - 书籍解析统一入口
 
 根据文件格式自动选择对应的解析器（EPUB/PDF/MOBI）。
+优先使用 Docling（高性能），回退 PyMuPDF/PaddleOCR。
 """
 
+import logging
 from typing import Dict, Optional
 from pathlib import Path
 
@@ -11,6 +13,16 @@ from parsers.base_parser import ParseResult
 from parsers.epub_parser import EpubParser
 from parsers.pdf_parser import PdfParser
 from parsers.mobi_parser import MobiParser
+
+# 尝试导入 Docling 解析器
+try:
+    from parsers.docling_parser import DoclingParser, is_docling_available
+    DOCLING_AVAILABLE = is_docling_available()
+except ImportError:
+    DOCLING_AVAILABLE = False
+    DoclingParser = None
+
+logger = logging.getLogger("BookGraph-Agent")
 
 
 class BookParser:
@@ -39,13 +51,19 @@ class BookParser:
         self._select_parser()
 
     def _select_parser(self):
-        """根据文件扩展名选择解析器"""
+        """根据文件扩展名选择解析器（优先 Docling）"""
         suffix = self.file_path.suffix.lower()
-        
+
         if suffix == '.epub':
             self.parser = EpubParser(str(self.file_path), self.config)
         elif suffix == '.pdf':
-            self.parser = PdfParser(str(self.file_path), self.config)
+            # 🔑 优先尝试 Docling（高性能）
+            if DOCLING_AVAILABLE:
+                logger.info("   🚀 使用 Docling 高性能解析器")
+                self.parser = DoclingParser(str(self.file_path), self.config)
+            else:
+                logger.info("   📄 Docling 不可用，回退 PyMuPDF")
+                self.parser = PdfParser(str(self.file_path), self.config)
         elif suffix in ['.mobi', '.azw', '.azw3']:
             self.parser = MobiParser(str(self.file_path), self.config)
         else:

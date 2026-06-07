@@ -39,6 +39,19 @@ try:
 except ImportError:
     OPENAI_AVAILABLE = False
 
+# 🔑 异步客户端（Phase 3: LLM 异步化）
+try:
+    from openai import AsyncOpenAI
+    ASYNC_OPENAI_AVAILABLE = True
+except ImportError:
+    ASYNC_OPENAI_AVAILABLE = False
+
+try:
+    from anthropic import AsyncAnthropic
+    ASYNC_ANTHROPIC_AVAILABLE = True
+except ImportError:
+    ASYNC_ANTHROPIC_AVAILABLE = False
+
 try:
     import tiktoken
     TIKTOKEN_AVAILABLE = True
@@ -785,13 +798,70 @@ class LLMClient:
                     return True
         return False
 
+    def _call_llm_with_schema(
+        self,
+        messages: List[Dict],
+        schema: Dict,
+        max_tokens: int = None
+    ) -> Dict:
+        """
+        强制 JSON Schema 输出（Phase 4）
+
+        使用 OpenAI response_format 强制 LLM 输出符合 schema 的 JSON。
+        消除解析错误和重试循环。
+
+        Args:
+            messages: 消息列表
+            schema: JSON Schema 字典
+            max_tokens: 最大输出 token 数
+
+        Returns:
+            Dict: 解析后的 JSON 对象
+        """
+        max_tokens = max_tokens or self.max_tokens
+
+        if not self.openai_client:
+            raise ValueError("OpenAI 客户端未初始化，无法使用 JSON Schema 模式")
+
+        try:
+            response = self.openai_client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=self.temperature,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "BookGraph",
+                        "schema": schema,
+                        "strict": True
+                    }
+                }
+            )
+
+            # 直接解析 JSON
+            import json
+            content = response.choices[0].message.content
+            return json.loads(content)
+
+        except Exception as e:
+            logger.error(f"❌ JSON Schema 模式失败: {str(e)[:100]}")
+            # 回退到普通模式
+            logger.warning("⚠️ 回退到普通模式，使用 parse_model_output 解析")
+            response = self._call_llm(messages, max_tokens)
+            if response:
+                result, success, error = parse_model_output(response)
+                if success:
+                    return result
+            raise
+
     def count_tokens(self, text: str) -> int:
         """
         计算文本的 token 数
-        
+
         Args:
             text: 文本内容
-            
+
         Returns:
             int: token 数量
         """
@@ -1196,7 +1266,176 @@ class LLMClient:
             {"role": "system", "content": "你是一位学科知识图谱专家。请智能整合新书内容到现有图谱中。"},
             {"role": "user", "content": prompt},
         ]
-        
+
         response = self._call_llm(messages, max_tokens=16384)
-        
+
         return response
+
+
+# ═══════════════════════════════════════════════════════════
+# Phase 3: 异步 LLM 客户端
+# ═══════════════════════════════════════════════════════════
+
+class AsyncLLMClient(LLMClient):
+    """
+    异步 LLM 客户端
+
+    使用原生 AsyncOpenAI/AsyncAnthropic，消除 asyncio.to_thread 包装开销。
+    配合 AsyncChunkProcessor 实现真正的并发处理。
+
+    用法：
+        async_client = AsyncLLMClient(config)
+        response = await async_client._call_llm_async(messages)
+    """
+
+    def __init__(self, config: Dict = None):
+        super().__init__(config)
+
+        # 异步客户端
+        self.async_openai_client = None
+        self.async_anthropic_client = None
+
+        self._init_async_client()
+
+    def _init_async_client(self):
+        """初始化异步客户端"""
+        # 初始化父类同步客户端（保留回退）
+        # super() 已经调用了 _init_client()
+
+        # 初始化异步客户端
+        if ASYNC_OPENAI_AVAILABLE and self.openai_client:
+            try:
+                self.async_openai_client = AsyncOpenAI(
+                    api_key=self.config.get('api_key', 'unused'),
+                    base_url=self.config.get('api_base', 'https://api.openai.com/v1'),
+                    timeout=self.config.get('timeout', 240),
+                )
+                logger.info("✅ AsyncOpenAI 客户端初始化成功")
+            except Exception as e:
+                logger.warning(f"⚠️ AsyncOpenAI 初始化失败: {e}")
+
+        if ASYNC_ANTHROPIC_AVAILABLE and self.anthropic_client:
+            try:
+                self.async_anthropic_client = AsyncAnthropic(
+                    api_key=os.environ.get('ANTHROPIC_API_KEY', ''),
+                    base_url=os.environ.get('ANTHROPIC_BASE_URL', ''),
+                )
+                logger.info("✅ AsyncAnthropic 客户端初始化成功")
+            except Exception as e:
+                logger.warning(f"⚠️ AsyncAnthropic 初始化失败: {e}")
+
+    async def _call_llm_async(self, messages: List[Dict], max_tokens: int = None) -> str:
+        """
+        异步调用 LLM
+
+        Args:
+            messages: 消息列表
+            max_tokens: 最大输出 token 数
+
+        Returns:
+            str: LLM 响应文本
+        """
+        max_tokens = max_tokens or self.max_tokens
+
+        # 优先使用 AsyncOpenAI
+        if self.async_openai_client:
+            try:
+                import time
+                call_start = time.time()
+
+                response = await self.async_openai_client.chat.completions.create(
+                    model=self.model,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=self.temperature
+                )
+
+                elapsed = time.time() - call_start
+
+                # 反馈给模型池管理器
+                if self.model_pool_manager:
+                    self.model_pool_manager.record_request_result(
+                        self.model, success=True, response_time=elapsed
+                    )
+
+                return response.choices[0].message.content
+
+            except Exception as e:
+                error_str = str(e)
+
+                # 反馈给模型池管理器
+                if self.model_pool_manager:
+                    self.model_pool_manager.record_request_result(
+                        self.model, success=False
+                    )
+
+                # 额度耗尽：切换模型
+                if self._is_quota_exhausted(error_str):
+                    if self.switch_to_next_model(f"额度耗尽: {self.model}"):
+                        # 递归重试（已切换模型）
+                        return await self._call_llm_async(messages, max_tokens)
+
+                logger.error(f"❌ AsyncOpenAI 调用失败: {error_str[:100]}")
+
+                # 回退到同步调用
+                return self._call_llm(messages, max_tokens)
+
+        # 回退到 AsyncAnthropic
+        elif self.async_anthropic_client:
+            try:
+                system_content = ""
+                user_messages = []
+
+                for msg in messages:
+                    if msg['role'] == 'system':
+                        system_content = msg['content']
+                    else:
+                        user_messages.append(msg)
+
+                # 🔑 Prompt Caching（Phase 5）
+                system_blocks = [
+                    {
+                        "type": "text",
+                        "text": system_content,
+                        "cache_control": {"type": "ephemeral"}
+                    }
+                ] if system_content else None
+
+                response = await self.async_anthropic_client.messages.create(
+                    model=self.model,
+                    max_tokens=max_tokens,
+                    temperature=self.temperature,
+                    system=system_blocks,
+                    messages=user_messages,
+                )
+
+                text = ""
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        text += block.text
+
+                return text if text else None
+
+            except Exception as e:
+                logger.error(f"❌ AsyncAnthropic 调用失败: {str(e)[:100]}")
+                # 回退到同步调用
+                return self._call_llm(messages, max_tokens)
+
+        # 无异步客户端：回退到同步
+        else:
+            return self._call_llm(messages, max_tokens)
+
+
+# ═══════════════════════════════════════════════════════════
+# 便捷函数
+# ═══════════════════════════════════════════════════════════
+
+_async_llm_client: Optional[AsyncLLMClient] = None
+
+
+def get_async_llm_client(config: Dict) -> AsyncLLMClient:
+    """获取全局异步 LLM 客户端单例"""
+    global _async_llm_client
+    if _async_llm_client is None:
+        _async_llm_client = AsyncLLMClient(config)
+    return _async_llm_client
