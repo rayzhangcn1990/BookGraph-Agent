@@ -1,7 +1,12 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python *)"
+      "Bash(python *)",
+      "Bash(gh api *)",
+      "Bash(rtk gh *)",
+      "Bash(python3 -c \"import sys, json, base64; data=json.load\\(sys.stdin\\); print\\(base64.b64decode\\(data['content']\\).decode\\(\\)\\)\")",
+      "Bash(python3 -c \"import sys, base64; content=sys.stdin.read\\(\\).strip\\(\\); print\\(base64.b64decode\\(content\\).decode\\(\\)\\)\")",
+      "Bash(python3 -c \"import sys, base64; print\\(base64.b64decode\\(sys.stdin.read\\(\\).strip\\(\\)\\).decode\\(\\)\\)\")"
     ]
   }
 }
