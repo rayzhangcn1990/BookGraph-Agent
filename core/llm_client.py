@@ -492,10 +492,9 @@ class LLMClient:
             logger.warning(f"获取模型列表失败，使用默认列表: {e}")
             self.model_rotation_list = model_priority
 
-        # 🔑 确保至少有一个模型（本地后备）
-        if not self.model_rotation_list:
-            self.model_rotation_list = ["hermes-local"]
-            self.use_hermes_llm = True
+        # 至少保留当前配置模型，避免空轮换列表把状态推入伪后备模式
+        if not self.model_rotation_list and self.model:
+            self.model_rotation_list = [self.model]
 
     def switch_to_next_model(self, reason: str = ""):
         """切换到下一个可用模型"""
@@ -525,10 +524,7 @@ class LLMClient:
             logger.info(f"🔄 使用免费模型: {self.model}")
             return True
 
-        # 🔑 最终后备：本地模型
-        logger.warning("⚠️ 所有远程模型不可用，启用本地处理模式")
-        self.use_hermes_llm = True
-        self.model = "hermes-local"
+        logger.warning("⚠️ 所有远程模型不可用")
         return False
 
     def _call_llm_hermes(self, system_prompt: str, user_prompt: str, max_tokens: int = None) -> str:
@@ -621,6 +617,9 @@ class LLMClient:
 
                         # 🔑 检测额度耗尽
                         if self._is_quota_exhausted(error_str):
+                            # 模型池关闭时，不要切换模型，直接抛出异常让调用方重试
+                            if not self.model_pool_manager:
+                                raise
                             logger.warning(f"⚠️ 模型 {current_model} 额度耗尽")
 
                             # 🔑 关键优化：如果是共享额度源（OpenRelay），直接切换API源
@@ -650,6 +649,8 @@ class LLMClient:
 
                         # 🔑 其他错误
                         elif 'error' in error_str.lower() or 'failed' in error_str.lower():
+                            if not self.model_pool_manager:
+                                raise
                             self.failed_models.add(current_model)
                             current_model_switches += 1
                             logger.warning(f"⚠️ 模型 {current_model} 调用失败: {error_str[:50]}")
@@ -718,17 +719,10 @@ class LLMClient:
                         self.failed_models.add(current_model)
                         return None
 
-                # 🔑 本地后备
+                # 无可用客户端时直接失败，不再回退到文件型本地模式
                 else:
-                    system_prompt = ""
-                    user_prompt = ""
-                    for msg in messages:
-                        if msg['role'] == 'system':
-                            system_prompt = msg['content']
-                        elif msg['role'] == 'user':
-                            user_prompt = msg['content']
-
-                    return self._call_llm_hermes(system_prompt, user_prompt, max_tokens)
+                    logger.error("❌ 未配置可用的远程 LLM 客户端")
+                    return None
 
             # 检查是否成功切换到新源
             if self.multi_source_manager and self.multi_source_manager.current_source:
@@ -738,17 +732,8 @@ class LLMClient:
             else:
                 break  # 无可用源，退出
 
-        # 所有源和模型都耗尽，使用本地处理
-        logger.warning("⚠️ 所有远程资源耗尽，使用本地处理")
-        system_prompt = ""
-        user_prompt = ""
-        for msg in messages:
-            if msg['role'] == 'system':
-                system_prompt = msg['content']
-            elif msg['role'] == 'user':
-                user_prompt = msg['content']
-
-        return self._call_llm_hermes(system_prompt, user_prompt, max_tokens)
+        logger.error("❌ 所有远程资源不可用，终止本次调用")
+        return None
 
     def _is_quota_exhausted(self, error_str: str) -> bool:
         """检测额度耗尽错误"""

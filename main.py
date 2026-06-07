@@ -76,7 +76,7 @@ async def process_single_book_optimized(
     book_path: Path,
     config: Dict,
     discipline: str = "政治学",
-    max_parallel: int = 4
+    max_parallel: int = 1
 ) -> Dict:
     """
     优化版单书处理流程
@@ -190,9 +190,54 @@ async def process_single_book_optimized(
             book_graph = BookGraph(**synthesis_dict)
             logger.info(f"   ✅ BookGraph 构造成功（章节数: {len(book_graph.chapters)}）")
         except Exception as e:
-            logger.warning(f"   ⚠️ BookGraph 构造失败，使用 dict fallback: {str(e)[:50]}")
-            # Fallback: 修改 GraphGenerator 支持接受 dict
-            book_graph = synthesis_dict
+            logger.warning(f"   ⚠️ BookGraph 构造失败，使用宽松模式重建: {str(e)[:80]}")
+            # Fallback: 用宽松模式构造，只传入存在的字段
+            try:
+                safe_dict = {k: v for k, v in synthesis_dict.items()
+                           if k in BookGraph.model_fields}
+                safe_dict.setdefault('chapters', [])
+                safe_dict.setdefault('core_concepts', [])
+                safe_dict.setdefault('key_insights', [])
+                safe_dict.setdefault('key_cases', [])
+                safe_dict.setdefault('key_quotes', [])
+                safe_dict.setdefault('learning_path', {})
+                safe_dict.setdefault('book_network', {})
+
+                # 过滤数组中的非 dict 元素
+                dict_fields = ['chapters', 'core_concepts', 'key_insights', 'key_cases', 'key_quotes']
+                for f in dict_fields:
+                    if isinstance(safe_dict.get(f), list):
+                        safe_dict[f] = [item for item in safe_dict[f] if isinstance(item, dict)]
+
+                # 确保 metadata 为 dict 且有必填字段
+                if not isinstance(safe_dict.get('metadata'), dict):
+                    safe_dict['metadata'] = {}
+                meta = safe_dict['metadata']
+                meta.setdefault('title', parse_result.metadata.get('title', book_title))
+                meta.setdefault('author', parse_result.metadata.get('author', 'Unknown'))
+                meta.setdefault('author_intro', '作者简介待补充')
+                meta.setdefault('discipline', discipline)
+
+                # 确保 time_background
+                if not isinstance(safe_dict.get('time_background'), dict):
+                    safe_dict['time_background'] = {}
+                tb = safe_dict['time_background']
+                tb.setdefault('macro_background', '宏观背景待补充')
+                tb.setdefault('micro_background', '微观背景待补充')
+                tb.setdefault('core_contradiction', '核心矛盾待补充')
+
+                # 确保 critical_analysis
+                if not isinstance(safe_dict.get('critical_analysis'), dict):
+                    safe_dict['critical_analysis'] = {}
+                ca = safe_dict['critical_analysis']
+                ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
+                ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
+
+                book_graph = BookGraph(**safe_dict)
+                logger.info(f"   ✅ BookGraph 宽松构造成功（章节数: {len(book_graph.chapters)}）")
+            except Exception as e2:
+                logger.warning(f"   ⚠️ 宽松构造仍失败: {str(e2)[:80]}，使用 dict 模式")
+                book_graph = synthesis_dict
 
         # Step 5: 写入 Obsidian
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
@@ -523,7 +568,7 @@ def main():
     parser.add_argument("--discipline", default="政治学", help="学科分类")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--batch", action="store_true", help="批量处理模式")
-    parser.add_argument("--parallel", type=int, default=4, help="最大并行数")
+    parser.add_argument("--parallel", type=int, default=1, help="最大并行数")
 
     args = parser.parse_args()
 

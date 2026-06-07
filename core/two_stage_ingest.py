@@ -2,17 +2,165 @@
 """
 两阶段 Chain-of-Thought 摄取 (llm_wiki 改进)
 阶段1: 分析 -> 阶段2: 生成
-支持增量缓存
+支持增量缓存 + 检查点恢复
 """
 
 import asyncio
 import json
 import hashlib
+import logging
 from pathlib import Path
 from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from utils.parse_cache import get_cache
+
+logger = logging.getLogger("BookGraph-Agent")
+
+
+class TwoStageIngest:
+    """
+    两阶段摄取管理器
+
+    支持检查点保存和恢复，确保失败时不会丢失已分析的结果
+    """
+
+    def __init__(self, checkpoint_dir: Optional[str] = None):
+        """
+        初始化两阶段摄取管理器
+
+        Args:
+            checkpoint_dir: 检查点保存目录，默认为 cache/checkpoints
+        """
+        self.cache = get_cache()
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path("cache/checkpoints")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_checkpoint(self, book_title: str, stage: str, data: Dict) -> None:
+        """
+        保存检查点
+
+        Args:
+            book_title: 书名
+            stage: 阶段名称（analysis, generation, full）
+            data: 检查点数据
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+        checkpoint_file = self.checkpoint_dir / f"{safe_title}_{stage}.json"
+
+        try:
+            data["checkpoint_time"] = datetime.now().isoformat()
+            with open(checkpoint_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"💾 检查点已保存: {checkpoint_file}")
+        except Exception as e:
+            logger.error(f"❌ 保存检查点失败: {e}")
+
+    def load_checkpoint(self, book_title: str, stage: str) -> Optional[Dict]:
+        """
+        加载检查点
+
+        Args:
+            book_title: 书名
+            stage: 阶段名称
+
+        Returns:
+            检查点数据，如果不存在返回 None
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+        checkpoint_file = self.checkpoint_dir / f"{safe_title}_{stage}.json"
+
+        if not checkpoint_file.exists():
+            return None
+
+        try:
+            with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"❌ 加载检查点失败: {e}")
+            return None
+
+    def get_remaining_chunks(self, book_title: str, all_chunks: List[Dict]) -> List[Dict]:
+        """
+        获取剩余未分析的 chunk
+
+        Args:
+            book_title: 书名
+            all_chunks: 所有 chunk 列表
+
+        Returns:
+            未分析的 chunk 列表
+        """
+        checkpoint = self.load_checkpoint(book_title, "analysis")
+        if not checkpoint:
+            return all_chunks
+
+        analyzed_count = checkpoint.get("chunks_analyzed", 0)
+        return all_chunks[analyzed_count:]
+
+    def can_skip_analysis(self, book_title: str) -> bool:
+        """
+        检查是否可以跳过分析阶段
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            是否可以跳过
+        """
+        checkpoint = self.load_checkpoint(book_title, "analysis")
+        return checkpoint is not None and checkpoint.get("status") == "complete"
+
+    def can_recover(self, book_title: str) -> bool:
+        """
+        检查是否可以恢复
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            是否存在可恢复的检查点
+        """
+        # 检查任一阶段的检查点
+        for stage in ["analysis", "generation", "full"]:
+            if self.load_checkpoint(book_title, stage):
+                return True
+        return False
+
+    def get_recovery_info(self, book_title: str) -> Optional[Dict]:
+        """
+        获取恢复信息
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            恢复信息
+        """
+        # 优先返回完整的检查点
+        for stage in ["full", "generation", "analysis"]:
+            checkpoint = self.load_checkpoint(book_title, stage)
+            if checkpoint:
+                checkpoint["stage"] = stage
+                return checkpoint
+        return None
+
+    def clean_checkpoints(self, book_title: str) -> None:
+        """
+        清理检查点
+
+        Args:
+            book_title: 书名
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+
+        for checkpoint_file in self.checkpoint_dir.glob(f"{safe_title}_*.json"):
+            try:
+                checkpoint_file.unlink()
+                logger.info(f"🗑️ 已清理检查点: {checkpoint_file}")
+            except Exception as e:
+                logger.error(f"❌ 清理检查点失败: {e}")
+
 
 # 阶段1: 分析提示词
 ANALYSIS_PROMPT = """请分析书籍内容，输出结构化分析（不生成最终 wiki 内容）。
@@ -109,11 +257,142 @@ GENERATION_PROMPT = """根据分析结果，生成书籍知识图谱。
 
 
 class TwoStageIngest:
-    """两阶段摄取处理器"""
+    """
+    两阶段摄取处理器
 
-    def __init__(self, llm_client):
+    支持检查点保存和恢复，确保失败时不会丢失已分析的结果
+    """
+
+    def __init__(self, llm_client, checkpoint_dir: Optional[str] = None):
         self.llm_client = llm_client
         self.cache = get_cache()
+        self.checkpoint_dir = Path(checkpoint_dir) if checkpoint_dir else Path("cache/checkpoints")
+        self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    def save_checkpoint(self, book_title: str, stage: str, data: Dict) -> None:
+        """
+        保存检查点
+
+        Args:
+            book_title: 书名
+            stage: 阶段名称（analysis, generation, full）
+            data: 检查点数据
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+        checkpoint_file = self.checkpoint_dir / f"{safe_title}_{stage}.json"
+
+        try:
+            data["checkpoint_time"] = datetime.now().isoformat()
+            with open(checkpoint_file, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            logger.info(f"💾 检查点已保存: {checkpoint_file}")
+        except Exception as e:
+            logger.error(f"❌ 保存检查点失败: {e}")
+
+    def load_checkpoint(self, book_title: str, stage: str) -> Optional[Dict]:
+        """
+        加载检查点
+
+        Args:
+            book_title: 书名
+            stage: 阶段名称
+
+        Returns:
+            检查点数据，如果不存在返回 None
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+        checkpoint_file = self.checkpoint_dir / f"{safe_title}_{stage}.json"
+
+        if not checkpoint_file.exists():
+            return None
+
+        try:
+            with open(checkpoint_file, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            logger.error(f"❌ 加载检查点失败: {e}")
+            return None
+
+    def get_remaining_chunks(self, book_title: str, all_chunks: List[Dict]) -> List[Dict]:
+        """
+        获取剩余未分析的 chunk
+
+        Args:
+            book_title: 书名
+            all_chunks: 所有 chunk 列表
+
+        Returns:
+            未分析的 chunk 列表
+        """
+        checkpoint = self.load_checkpoint(book_title, "analysis")
+        if not checkpoint:
+            return all_chunks
+
+        analyzed_count = checkpoint.get("chunks_analyzed", 0)
+        return all_chunks[analyzed_count:]
+
+    def can_skip_analysis(self, book_title: str) -> bool:
+        """
+        检查是否可以跳过分析阶段
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            是否可以跳过
+        """
+        checkpoint = self.load_checkpoint(book_title, "analysis")
+        return checkpoint is not None and checkpoint.get("status") == "complete"
+
+    def can_recover(self, book_title: str) -> bool:
+        """
+        检查是否可以恢复
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            是否存在可恢复的检查点
+        """
+        # 检查任一阶段的检查点
+        for stage in ["analysis", "generation", "full"]:
+            if self.load_checkpoint(book_title, stage):
+                return True
+        return False
+
+    def get_recovery_info(self, book_title: str) -> Optional[Dict]:
+        """
+        获取恢复信息
+
+        Args:
+            book_title: 书名
+
+        Returns:
+            恢复信息
+        """
+        # 优先返回完整的检查点
+        for stage in ["full", "generation", "analysis"]:
+            checkpoint = self.load_checkpoint(book_title, stage)
+            if checkpoint:
+                checkpoint["stage"] = stage
+                return checkpoint
+        return None
+
+    def clean_checkpoints(self, book_title: str) -> None:
+        """
+        清理检查点
+
+        Args:
+            book_title: 书名
+        """
+        safe_title = book_title.replace("/", "_").replace("\\", "_")
+
+        for checkpoint_file in self.checkpoint_dir.glob(f"{safe_title}_*.json"):
+            try:
+                checkpoint_file.unlink()
+                logger.info(f"🗑️ 已清理检查点: {checkpoint_file}")
+            except Exception as e:
+                logger.error(f"❌ 清理检查点失败: {e}")
 
     def _get_analysis_cache_key(self, book_title: str, content_hash: str) -> str:
         """生成分析缓存键"""
@@ -130,7 +409,7 @@ class TwoStageIngest:
         # 检查缓存
         cached = self.cache.get(cache_key)
         if cached:
-            print(f"   📦 使用分析缓存: {cache_key}")
+            logger.info(f"使用分析缓存: {cache_key}")
             return cached
 
         # 调用 LLM 分析
@@ -159,7 +438,7 @@ class TwoStageIngest:
                     return analysis
 
         except Exception as e:
-            print(f"   ⚠️ 分析失败: {e}")
+            logger.warning(f"分析失败: {e}")
 
         return None
 
@@ -192,7 +471,7 @@ class TwoStageIngest:
                     return json.loads(json_match.group())
 
         except Exception as e:
-            print(f"   ⚠️ 生成失败: {e}")
+            logger.warning(f"生成失败: {e}")
 
         return None
 
@@ -200,14 +479,14 @@ class TwoStageIngest:
         """
         完整的两阶段摄取流程
         """
-        print(f"   🔍 阶段1: 分析 {book_title}...")
+        logger.info(f"阶段1: 分析 {book_title}...")
         analysis = await self.analyze(book_title, author, content_summary)
 
         if not analysis:
-            print(f"   ❌ 分析失败")
+            logger.error(f"分析失败")
             return None
 
-        print(f"   📝 阶段2: 生成知识图谱...")
+        logger.info(f"阶段2: 生成知识图谱...")
         result = await self.generate(book_title, author, discipline, analysis)
 
         return result

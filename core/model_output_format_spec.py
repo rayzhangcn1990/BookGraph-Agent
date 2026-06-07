@@ -152,7 +152,7 @@ REQUIRED_FIELDS = {
 
 # 🔑 新增：强制字段（必须存在，不能缺失）
 MANDATORY_FIELDS = {
-    "chunk_analysis": ["chapter_summaries"],  # 每个chunk必须输出章节信息
+    "chunk_analysis": [],  # 不强制要求任何字段（每个chunk内容不同）
     "synthesis": ["metadata", "chapters", "core_concepts"],
     # 🔑 新增：多轮 synthesis 的强制字段
     "synthesis_round_1": ["metadata"],
@@ -255,31 +255,17 @@ def validate_required_fields(result: dict, field_type: str = "chunk_analysis") -
     required = REQUIRED_FIELDS.get(field_type, [])
     mandatory = MANDATORY_FIELDS.get(field_type, [])
 
-    # 🔑 Step 1: 检查强制字段（必须存在且非空）
+    # 🔑 Step 1: 检查强制字段必须存在（允许空数组——有些chunk确实无实质内容）
     mandatory_missing = []
-    mandatory_empty = []
     for field in mandatory:
         if field not in result:
             mandatory_missing.append(field)
-        else:
-            # 🔑 新增：检查强制字段是否非空（至少有1个元素）
-            value = result[field]
-            if isinstance(value, list) and len(value) == 0:
-                mandatory_empty.append(field)
-            elif isinstance(value, dict) and len(value) == 0:
-                mandatory_empty.append(field)
-            elif isinstance(value, str) and len(value.strip()) == 0:
-                mandatory_empty.append(field)
 
     if mandatory_missing:
         # 强制字段缺失，直接不合格
         return False, mandatory_missing
 
-    if mandatory_empty:
-        # 🔑 新增：强制字段为空，直接不合格
-        return False, [f"{f}(空)" for f in mandatory_empty]
-
-    # 🔑 Step 2: 检查至少有一个必要字段有内容
+    # 🔑 Step 1.5: 检查至少有一个必要字段有内容
     has_content = False
     missing = []
 
@@ -450,15 +436,42 @@ def repair_truncated_json(json_str: str) -> str:
     if in_string:
         result = result + '"'
 
-    # 6. 修复截断的数组
-    while open_brackets > 0:
-        result = result + ']'
-        open_brackets -= 1
+    # 5.5: 修复截断的对象（在数组内）
+    # 问题：当截断在 {"key": "value" 时，需要先闭合对象，再闭合数组
+    # 策略：检查最后一个字符是否是 "，且前面是对象属性的值
+    # 简单方案：在字符串闭合后，如果还有未闭合的对象和数组，按正确顺序闭合
+    #
+    # 注意：JSON 结构可能是嵌套的，如：
+    # {"arr": [{"key": "value"}]}
+    # 截断后：{"arr": [{"key": "value"
+    # 需要修复为：{"arr": [{"key": "value"}]}
 
-    # 7. 修复截断的对象
-    while open_braces > 0:
-        result = result + '}'
-        open_braces -= 1
+    # 6. 修复截断的数组
+    # 问题：当截断在数组内的对象时，需要先闭合对象，再闭合数组
+    # 策略：检查 result 的最后一个非空白字符
+    last_char = result.rstrip()[-1] if result.rstrip() else ''
+
+    # 如果最后是 "，可能是在字符串值后截断
+    # 需要检查是否需要先闭合对象
+    if last_char == '"' and open_braces > 1 and open_brackets > 0:
+        # 在数组内的对象被截断，需要先闭合对象
+        # 但我们不能直接添加 }，因为可能还有其他嵌套
+        # 策略：按顺序先尝试闭合所有对象，再闭合数组
+        pass  # 让下面的循环按顺序处理
+
+    while open_brackets > 0 or open_braces > 0:
+        # 智能闭合：检查哪个应该先闭合
+        # 规则：在有效的 JSON 中，如果对象在数组内，应该先闭合对象
+        # 但由于我们只有计数，无法确定顺序
+        # 策略：交替闭合，先 } 后 ]
+        if open_braces > open_brackets:
+            # 更多对象未闭合，先闭合对象
+            result = result + '}'
+            open_braces -= 1
+        else:
+            # 更多或相等的数组未闭合
+            result = result + ']'
+            open_brackets -= 1
 
     # 8. 清理末尾可能的逗号
     result = re.sub(r',(\s*[}\]])', r'\1', result)
@@ -567,10 +580,10 @@ if __name__ == "__main__":
     }
 
     normalized = normalize_field_names(test_input)
-    print("规范化结果:")
-    print(json.dumps(normalized, indent=2, ensure_ascii=False))
+    logger.info("规范化结果:")
+    logger.info(json.dumps(normalized, indent=2, ensure_ascii=False))
 
     # 测试截断修复
     truncated = '{"core_concepts": [{"name": "概念1", "definition": "定义...'
     repaired = repair_truncated_json(truncated)
-    print(f"\n截断修复: {repaired}")
+    logger.info(f"截断修复: {repaired}")

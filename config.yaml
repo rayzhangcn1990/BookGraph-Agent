@@ -31,22 +31,22 @@ obsidian:
     beginner: "入门指南"
 
 llm:
-  # 主模型配置（使用本地专用端点）
+  # 主模型配置（使用本地代理 - 指定稳定模型）
   provider: "openai"
-  model: "deepseek-ai/deepseek-v4-pro"
+  model: "meta-llama/llama-3.3-70b-instruct:free"  # 使用稳定可靠的 Llama 3.3 70B 免费
   api_base: "http://localhost:3001/v1"
-  api_key: "freellmapi-2148be2025c27b01d9096ffb1690241b2ce4e4c6625b244a"
-  max_tokens: 16384
+  api_key: "${FREELLMAPI_KEY}"  # 从环境变量读取，避免硬编码
+  max_tokens: 8192
   temperature: 0.3
-  chunk_size: 25000
-  merge_threshold: 15000
+  chunk_size: 5000
+  merge_threshold: 3000
   max_retries: 5
   retry_delay: 10
   timeout: 240
 
   # 模型池配置
   model_pool:
-    enabled: true
+    enabled: false
     auto_verify: true
     verify_interval: 3600
     min_stability: 0.7

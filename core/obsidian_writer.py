@@ -9,6 +9,7 @@ from pathlib import Path
 from datetime import datetime
 import shutil
 import os
+import re
 
 from schemas.book_graph_schema import BookGraph, DisciplineType
 
@@ -37,7 +38,7 @@ class ObsidianWriter:
                 - subdirectories: 子目录配置
         """
         self.config = config or {}
-        self.vault_path = Path(self.config.get('vault_path', ''))
+        self.vault_path = Path(self._resolve_path_value(self.config.get('vault_path', '')))
         self.graph_root = self.config.get('graph_root', '📚 知识图谱')
         self.discipline_paths = self.config.get('discipline_paths', {})
         self.subdirectories = self.config.get('subdirectories', {
@@ -276,6 +277,17 @@ class ObsidianWriter:
                 books.append(file.stem)
         
         return sorted(books)
+
+    def _resolve_path_value(self, value: str) -> str:
+        """解析配置中的 ${VAR_NAME} 环境变量引用。"""
+        if not isinstance(value, str):
+            return value
+
+        def replace_env_var(match: re.Match) -> str:
+            var_name = match.group(1)
+            return os.environ.get(var_name, '')
+
+        return re.sub(r'\$\{([^}]+)\}', replace_env_var, value)
 
     def _get_discipline_path(self, discipline: str) -> Path:
         """

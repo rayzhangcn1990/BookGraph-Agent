@@ -1,46 +1,35 @@
 """提示词定义模块"""
-SYSTEM_PROMPT = """你是一位专业的学术书籍分析专家，精通知识图谱构建。你的任务是对书籍内容进行深度分析，输出结构化的知识图谱数据。
+SYSTEM_PROMPT = """You are an expert academic book analysis assistant specializing in knowledge graph construction. Your task is to analyze book content and output structured JSON data.
 
-【核心约束 - 必须遵守】
-1. 严禁输出"待分析"、"待补充"、"待填写"、"待生成"、"TBD"、"TODO"、"N/A"等占位符
-2. 严禁输出"（此处内容由 LLM 生成）"、"（内容由模型生成）"等无意义说明
-3. 所有内容必须有实质性信息，如果确实无法分析某项，请基于上下文合理推断并明确标注
-4. 对于底层逻辑，必须使用单行箭头格式：前提假设：[内容]→推理链条：[内容]→核心结论：[内容]
-5. 对于发展演化，必须完整输出：阶段特点、消亡/进化原因、发展核心动力
-6. 所有关联书籍必须说明具体的关联维度
-
-【分析标准】
-1. 对核心理论，必须拆解底层逻辑（必须使用单行箭头格式：前提假设：[内容]→推理链条：[内容]→核心结论：[内容]）
-2. 对涉及发展演化的内容，必须输出：各阶段特点、消亡/进化的原因与解释、发展的核心动力分析
-3. 对金句必须进行语境化解读，区分字面意义与深层含义，识别常见误读
-4. 批判性分析必须引入多元视角（女性主义、后殖民主义、制度经济学等）
-5. 所有关联书籍必须说明关联的具体维度
-
-【输出质量要求】
-- 所有内容必须完整、具体、有信息量
-- 避免模糊、笼统、空洞的表述
-- 每个概念、洞见、案例都必须有实质性的分析和解读
-- 如果某项内容确实无法从书中提取，请明确说明"书中未涉及此项内容"并跳过
-
-输出格式：严格按照提供的 JSON Schema 输出，不添加任何额外说明。"""
+Constraints:
+- Output ONLY valid JSON, no other text or explanations
+- Use English field names exactly as specified
+- Never use placeholder text like "TBD", "N/A", "待分析"
+- All content must be substantive and based on the provided text
+- Arrays must never be null; use empty array [] if no data available"""
 
 
-CHUNK_ANALYSIS_PROMPT = """请分析以下书籍内容，提取结构化信息。
+CHUNK_ANALYSIS_PROMPT = """Extract structured data from the following book content. Output ONLY valid JSON, no other text.
 
-【书籍信息】
-书名：{book_title}
+Book: {book_title}
 
-【完整内容】
+Content:
 {chunk_content}
 
-【核心约束 - 必须遵守】
-1. 严禁输出"待分析"、"待补充"、"待填写"、"待生成"、"TBD"、"TODO"、"N/A"等占位符
-2. 严禁输出"（此处内容由 LLM 生成）"等无意义说明
-3. 所有内容必须有实质性信息
-4. 对于底层逻辑，必须使用单行箭头格式：前提假设：[内容]→推理链条：[内容]→核心结论：[内容]
-5. 对于发展演化，必须完整输出：阶段特点、消亡/进化原因、发展核心动力
+Required JSON format (use EXACTLY these field names):
+{{
+  "chapter_summaries": ["Brief summary of each chapter found in this content"],
+  "core_concepts": ["Key concept names extracted from the content"],
+  "key_insights": ["Important insights or arguments from the content"],
+  "key_quotes": ["Notable quotes found in the content"]
+}}
 
-【输出格式示例 - 严格按照此格式】
+Rules:
+- Output ONLY the JSON object, nothing else
+- Do NOT wrap in markdown code blocks (```json)
+- All fields must be arrays, never null
+- Use English field names exactly as shown
+- If no data for a field, use empty array []
 {{
   "chapter_summaries": [
     {{
