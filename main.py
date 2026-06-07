@@ -18,6 +18,7 @@ import argparse
 import sys
 import yaml
 import json
+import re
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -32,7 +33,7 @@ from core.llm_client import LLMClient, SYSTEM_PROMPT, CHUNK_ANALYSIS_PROMPT, SYN
 from core.book_parser import BookParser
 from core.graph_generator import GraphGenerator
 from core.obsidian_writer import ObsidianWriter
-from core.optimized_chunk_processor import process_book_chunks_optimized
+from core.optimized_chunk_processor import process_book_chunks_native_async
 from core.model_output_format_spec import parse_model_output
 from utils.parse_cache import get_cache
 from utils.logger import setup_logger
@@ -111,8 +112,12 @@ async def process_single_book_optimized(
         llm_client = get_llm_client(config)
         book_title = parse_result.metadata.get('title', book_path.stem)
 
-        chunk_results = await process_book_chunks_optimized(
-            llm_client,
+        # 🔑 使用原生异步处理（Phase 3）
+        from core.llm_client import get_async_llm_client
+        async_llm_client = get_async_llm_client(config)
+
+        chunk_results = await process_book_chunks_native_async(
+            async_llm_client,
             chunks,
             book_title,
             SYSTEM_PROMPT,
