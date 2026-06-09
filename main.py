@@ -19,9 +19,10 @@ import sys
 import yaml
 import json
 import re
+import hashlib
 from pathlib import Path
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 # 项目路径
 sys.path.insert(0, str(Path(__file__).parent))
@@ -35,10 +36,38 @@ from core.graph_generator import GraphGenerator
 from core.obsidian_writer import ObsidianWriter
 from core.optimized_chunk_processor import process_book_chunks_native_async
 from core.model_output_format_spec import parse_model_output
+from core.local_evidence_preprocessor import LocalEvidencePreprocessor
 from utils.parse_cache import get_cache
 from utils.logger import setup_logger
 
 logger = setup_logger("BookGraph-Optimized")
+
+
+class QualityGateError(RuntimeError):
+    """质量门检查失败。"""
+
+
+def _safe_filename(name: str, max_bytes: int = 180) -> str:
+    """生成安全文件名，避免书名中的路径分隔符和字节长度影响落盘。"""
+    safe = re.sub(r'[\\/:*?"<>|\x00-\x1f]', '_', str(name or 'untitled'))
+    safe = safe.strip(' ._') or 'untitled'
+    digest = hashlib.sha1(safe.encode('utf-8')).hexdigest()[:8]
+    suffix = f"_{digest}"
+    budget = max(1, max_bytes - len(suffix.encode('utf-8')))
+
+    encoded = safe.encode('utf-8')
+    if len(encoded) > budget:
+        encoded = encoded[:budget]
+        safe = encoded.decode('utf-8', errors='ignore').strip(' ._') or 'untitled'
+
+    return f"{safe}{suffix}"
+
+
+def _quality_report_path(book_title: str) -> Path:
+    """返回项目内质量报告路径。"""
+    quality_dir = Path(__file__).resolve().parent / "logs" / "quality_reports"
+    quality_dir.mkdir(parents=True, exist_ok=True)
+    return quality_dir / f"{_safe_filename(book_title)}_quality_report.md"
 
 
 # ═══════════════════════════════════════════════════════════
@@ -108,6 +137,18 @@ async def process_single_book_optimized(
         chunks = _semantic_chunking(parse_result, config)
         logger.info(f"   🧩 分块: {len(chunks)} 块")
 
+        # Step 2.5: 本地 evidence 预处理（如果启用）
+        local_hints_by_chunk = {}
+        local_preprocessor_config = config.get('improvements', {}).get('local_evidence_preprocessor', {})
+        if local_preprocessor_config.get('enabled', False):
+            logger.info("   📍 启用本地 evidence 预处理")
+            local_preprocessor = LocalEvidencePreprocessor(local_preprocessor_config)
+            local_hints_by_chunk = await local_preprocessor.preprocess_chunks(
+                book_title=parse_result.metadata.get('title', book_path.stem),
+                chunks=chunks,
+                max_parallel=int(local_preprocessor_config.get('max_parallel', 1)),
+            )
+
         # Step 3: 并行处理 chunks（优化核心）
         llm_client = get_llm_client(config)
         book_title = parse_result.metadata.get('title', book_path.stem)
@@ -122,7 +163,8 @@ async def process_single_book_optimized(
             book_title,
             SYSTEM_PROMPT,
             CHUNK_ANALYSIS_PROMPT,
-            max_parallel
+            max_parallel,
+            local_hints_by_chunk=local_hints_by_chunk,
         )
 
         if not chunk_results:
@@ -143,63 +185,55 @@ async def process_single_book_optimized(
 
         # 检查是否启用两阶段摄取
         two_stage_enabled = config.get('improvements', {}).get('two_stage_ingest', {}).get('enabled', False)
+        quality_gate_config = config.get('improvements', {}).get('quality_gate', {})
+        max_quality_retries = int(quality_gate_config.get('max_synthesis_retries', 2))
 
-        if two_stage_enabled:
-            logger.info("   🔄 使用两阶段 COT 摄取 (分析 → 生成)")
-            # 准备内容摘要 (取前若干个 chunk 的文本)
-            content_summary = " ".join([chunk[1][:500] for chunk in chunks[:5]])
-            ingest = TwoStageIngest(llm_client)
-            synthesis = await ingest.process(
-                book_title=book_title,
-                author=parse_result.metadata.get('author', 'Unknown'),
-                discipline=discipline,
-                content_summary=content_summary
-            )
-            if not synthesis:
-                logger.warning("   ⚠️ 两阶段摄取失败，回退到多轮合成")
-                synthesis = await synthesize_multi_round(
-                    llm_client,
-                    chunk_results,
-                    book_title,
-                    parse_result.metadata.get('author', 'Unknown'),
-                    discipline,
-                    expected_chapters
+        async def run_synthesis(retry_feedback: str = ""):
+            """运行综合阶段；质量重试时直接使用多轮合成并注入质量报告。"""
+            if two_stage_enabled and not retry_feedback:
+                logger.info("   🔄 使用两阶段 COT 摄取 (分析 → 生成)")
+                content_summary = " ".join([chunk[1][:500] for chunk in chunks[:5]])
+                ingest = TwoStageIngest(llm_client)
+                two_stage_result = await ingest.process(
+                    book_title=book_title,
+                    author=parse_result.metadata.get('author', 'Unknown'),
+                    discipline=discipline,
+                    content_summary=content_summary
                 )
-        else:
-            synthesis = await synthesize_multi_round(
+                if two_stage_result:
+                    return two_stage_result
+                logger.warning("   ⚠️ 两阶段摄取失败，回退到多轮合成")
+
+            return await synthesize_multi_round(
                 llm_client,
                 chunk_results,
                 book_title,
                 parse_result.metadata.get('author', 'Unknown'),
                 discipline,
-                expected_chapters
+                expected_chapters,
+                retry_feedback=retry_feedback
             )
 
-        if not synthesis:
-            raise Exception("多轮综合分析失败")
+        def build_book_graph(synthesis_data):
+            """规范化综合结果并构造 BookGraph，失败时返回 schema 错误。"""
+            from schemas.book_graph_schema import BookGraph
 
-        logger.info(f"   ✅ 多轮综合分析完成")
+            synthesis_dict = llm_client._normalize_book_graph_data(
+                synthesis_data,
+                parse_result.metadata
+            )
 
-        # 🔑 新增：将 dict 转换为 BookGraph 对象
-        from schemas.book_graph_schema import BookGraph
-        from core.llm_client import LLMClient
+            try:
+                graph = BookGraph(**synthesis_dict)
+                logger.info(f"   ✅ BookGraph 构造成功（章节数: {len(graph.chapters)}）")
+                return graph, ""
+            except Exception as e:
+                schema_error = str(e)[:200]
+                logger.warning(f"   ⚠️ BookGraph 构造失败，使用宽松模式重建: {schema_error[:80]}")
 
-        # 规范化数据（填充缺失字段）
-        synthesis_dict = llm_client._normalize_book_graph_data(
-            synthesis,
-            parse_result.metadata
-        )
-
-        # 构造 BookGraph 对象
-        try:
-            book_graph = BookGraph(**synthesis_dict)
-            logger.info(f"   ✅ BookGraph 构造成功（章节数: {len(book_graph.chapters)}）")
-        except Exception as e:
-            logger.warning(f"   ⚠️ BookGraph 构造失败，使用宽松模式重建: {str(e)[:80]}")
-            # Fallback: 用宽松模式构造，只传入存在的字段
             try:
                 safe_dict = {k: v for k, v in synthesis_dict.items()
-                           if k in BookGraph.model_fields}
+                             if k in BookGraph.model_fields}
                 safe_dict.setdefault('chapters', [])
                 safe_dict.setdefault('core_concepts', [])
                 safe_dict.setdefault('key_insights', [])
@@ -208,43 +242,82 @@ async def process_single_book_optimized(
                 safe_dict.setdefault('learning_path', {})
                 safe_dict.setdefault('book_network', {})
 
-                # 过滤数组中的非 dict 元素
                 dict_fields = ['chapters', 'core_concepts', 'key_insights', 'key_cases', 'key_quotes']
                 for f in dict_fields:
                     if isinstance(safe_dict.get(f), list):
                         safe_dict[f] = [item for item in safe_dict[f] if isinstance(item, dict)]
 
-                # 确保 metadata 为 dict 且有必填字段
                 if not isinstance(safe_dict.get('metadata'), dict):
                     safe_dict['metadata'] = {}
                 meta = safe_dict['metadata']
                 meta.setdefault('title', parse_result.metadata.get('title', book_title))
                 meta.setdefault('author', parse_result.metadata.get('author', 'Unknown'))
-                meta.setdefault('author_intro', '作者简介待补充')
+                meta.setdefault('author_intro', '')
                 meta.setdefault('discipline', discipline)
 
-                # 确保 time_background
                 if not isinstance(safe_dict.get('time_background'), dict):
                     safe_dict['time_background'] = {}
                 tb = safe_dict['time_background']
-                tb.setdefault('macro_background', '宏观背景待补充')
-                tb.setdefault('micro_background', '微观背景待补充')
-                tb.setdefault('core_contradiction', '核心矛盾待补充')
+                tb.setdefault('macro_background', '')
+                tb.setdefault('micro_background', '')
+                tb.setdefault('core_contradiction', '')
 
-                # 确保 critical_analysis
                 if not isinstance(safe_dict.get('critical_analysis'), dict):
                     safe_dict['critical_analysis'] = {}
                 ca = safe_dict['critical_analysis']
-                ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
-                ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
+                ca.setdefault('feminist_perspective', '')
+                ca.setdefault('postcolonial_perspective', '')
+                ca.setdefault('ethical_boundaries', {})
 
-                book_graph = BookGraph(**safe_dict)
-                logger.info(f"   ✅ BookGraph 宽松构造成功（章节数: {len(book_graph.chapters)}）")
+                graph = BookGraph(**safe_dict)
+                logger.info(f"   ✅ BookGraph 宽松构造成功（章节数: {len(graph.chapters)}）")
+                return graph, schema_error
             except Exception as e2:
-                logger.warning(f"   ⚠️ 宽松构造仍失败: {str(e2)[:80]}，使用 dict 模式")
-                book_graph = synthesis_dict
+                schema_err = f"{schema_error}; 宽松构造失败：{str(e2)[:200]}"
+                logger.warning(f"   ⚠️ 宽松构造仍失败: {schema_err[:200]}")
+                return synthesis_dict, schema_err
 
-        # Step 5: 写入 Obsidian
+        # Step 5: 写入前质量检查；失败时定向重试综合阶段，仍失败则阻止写入
+        from core.book_graph_quality_checker import check_book_graph_quality
+
+        book_graph = None
+        quality_report = ""
+        quality_passed = False
+
+        for quality_attempt in range(max_quality_retries + 1):
+            if quality_attempt > 0:
+                logger.warning(
+                    "   🔁 质量门未通过，定向重试综合阶段 (%s/%s)",
+                    quality_attempt,
+                    max_quality_retries
+                )
+
+            synthesis = await run_synthesis(quality_report if quality_attempt > 0 else "")
+            if not synthesis:
+                raise Exception("多轮综合分析失败")
+
+            logger.info("   ✅ 综合分析完成")
+            book_graph, schema_error = build_book_graph(synthesis)
+            quality_data = book_graph.model_dump() if hasattr(book_graph, 'model_dump') else book_graph
+            quality_passed, quality_report = check_book_graph_quality(quality_data, expected_chapters)
+            if schema_error:
+                quality_passed = False
+                quality_report += f"\n**Schema 校验问题**:\n\n- ❌ BookGraph schema 校验失败：{schema_error}\n"
+            if quality_passed:
+                logger.info("   ✅ 写入前质量检查通过")
+                break
+
+        if not quality_passed:
+            quality_path = _quality_report_path(book_title)
+            try:
+                quality_path.write_text(quality_report, encoding="utf-8")
+            except OSError as save_error:
+                logger.error("   ❌ 质量报告保存失败: %s", save_error)
+                logger.error("%s", quality_report)
+            logger.error("   ❌ 质量检查不通过: %s", quality_path)
+            raise QualityGateError(f"质量检查不通过，已阻止写入: {quality_path}")
+
+        # Step 6: 写入 Obsidian
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
         graph_generator = GraphGenerator(config)
 
@@ -400,7 +473,66 @@ def _semantic_chunking(parse_result, config: Dict) -> List:
     avg_tokens = sum(len(c[1]) // 4 for c in chunks) / len(chunks) if chunks else 0
     logger.info(f"   📊 分块完成: {len(chunks)} 块，平均 {int(avg_tokens)} token")
 
+    # 🔑 优化：合并小块（减少碎片化）
+    if avg_tokens < 1000 and len(chunks) > 50:
+        logger.info(f"   🔧 检测到碎片化分块（平均 {int(avg_tokens)} token），开始合并...")
+        chunks = _merge_small_chunks(chunks, target_tokens=2000, min_tokens=500)
+        new_avg_tokens = sum(len(c[1]) // 4 for c in chunks) / len(chunks) if chunks else 0
+        logger.info(f"   ✅ 合并完成: {len(chunks)} 块，平均 {int(new_avg_tokens)} token")
+
     return chunks
+
+
+def _merge_small_chunks(
+    chunks: List[Tuple[int, str, str]],
+    target_tokens: int = 2000,
+    min_tokens: int = 500
+) -> List[Tuple[int, str, str]]:
+    """
+    🔑 合并小块：减少碎片化，提高 LLM 调用效率
+
+    Args:
+        chunks: 原始分块列表 [(index, content, label)]
+        target_tokens: 目标 token 数（合并后尽量接近）
+        min_tokens: 最小 token 数（低于此值的小块必须合并）
+
+    Returns:
+        List[Tuple[int, str, str]]: 合并后的分块列表
+    """
+    if not chunks:
+        return []
+
+    merged = []
+    current_buffer = []
+    current_tokens = 0
+
+    for chunk in chunks:
+        _, content, label = chunk
+        chunk_tokens = len(content) // 4
+
+        should_flush = (
+            current_buffer
+            and current_tokens >= min_tokens
+            and current_tokens + chunk_tokens > target_tokens
+        )
+
+        if should_flush:
+            merged_content = "\n\n".join(c[1] for c in current_buffer)
+            merged_label = current_buffer[0][2]
+            merged.append((current_buffer[0][0], merged_content, merged_label))
+            current_buffer = []
+            current_tokens = 0
+
+        current_buffer.append(chunk)
+        current_tokens += chunk_tokens
+
+    # 处理最后的缓冲区
+    if current_buffer:
+        merged_content = "\n\n".join(c[1] for c in current_buffer)
+        merged_label = current_buffer[0][2]
+        merged.append((current_buffer[0][0], merged_content, merged_label))
+
+    return merged
 
 
 def _extract_chapters_list(chunk_results: List[Dict]) -> str:
