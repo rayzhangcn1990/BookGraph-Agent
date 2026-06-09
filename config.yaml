@@ -91,9 +91,9 @@ improvements:
   two_stage_ingest:
     enabled: true         # 启用后将替代多轮合成中的 Round1‑5
     cache_results: true   # 缓存分析阶段结果 (基于内容哈希)
-  # 本地证据预处理：使用 NAS Ollama 小模型做短 JSON 候选信号抽取
+  # 本地证据预处理：使用 NAS Ollama 小模型做短 JSON 候选信号抽取（已禁用，放弃本地 Ollama）
   local_evidence_preprocessor:
-    enabled: true
+    enabled: false
     provider: "ollama"
     api_base: "http://10.108.1.143:11434"
     model: "qwen2.5:3b"
