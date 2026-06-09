@@ -25,6 +25,30 @@ from utils.parse_cache import get_cache
 logger = logging.getLogger("BookGraph-Agent")
 
 
+def _format_local_hint_for_prompt(hint) -> str:
+    """将本地预处理候选信号格式化为 prompt 片段。"""
+    if not hint:
+        return ""
+
+    chapter_ref = getattr(hint, "chapter_ref", "") or "未知"
+    concepts = getattr(hint, "concept_candidates", []) or []
+    quotes = getattr(hint, "quote_candidates", []) or []
+
+    if not concepts and not quotes and chapter_ref == "未知":
+        return ""
+
+    lines = [
+        "【本地预处理候选信号】",
+        f"可能章节：{chapter_ref}",
+    ]
+    if concepts:
+        lines.append(f"候选概念：{'、'.join(concepts[:8])}")
+    if quotes:
+        lines.append(f"候选金句：{'；'.join(quotes[:5])}")
+    lines.append("注意：这些只是本地小模型候选信号，必须以原文为准，不可盲信。")
+    return "\n".join(lines)
+
+
 @dataclass
 class ChunkResult:
     """Chunk 处理结果"""
@@ -320,7 +344,8 @@ class NativeAsyncChunkProcessor:
         book_title: str,
         system_prompt: str,
         chunk_prompt_template: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        local_hints_by_chunk: Optional[Dict[int, object]] = None,
     ) -> ChunkResult:
         """
         处理单个 chunk（原生异步）
@@ -332,6 +357,7 @@ class NativeAsyncChunkProcessor:
             system_prompt: 系统提示词
             chunk_prompt_template: chunk 提示词模板
             use_cache: 是否使用缓存
+            local_hints_by_chunk: 本地预处理候选信号映射
 
         Returns:
             ChunkResult: 处理结果
@@ -351,11 +377,16 @@ class NativeAsyncChunkProcessor:
                     elapsed_seconds=elapsed
                 )
 
-        # Step 2: 构建 prompt
+        # Step 2: 构建 prompt（注入本地 hints）
         prompt = chunk_prompt_template.format(
             book_title=book_title,
             chunk_content=chunk_content
         )
+        local_hint_text = _format_local_hint_for_prompt(
+            (local_hints_by_chunk or {}).get(chunk_index)
+        )
+        if local_hint_text:
+            prompt = f"{local_hint_text}\n\n{prompt}"
 
         messages = [
             {"role": "system", "content": system_prompt},
@@ -395,6 +426,20 @@ class NativeAsyncChunkProcessor:
                         elapsed_seconds=elapsed
                     )
                 else:
+                    if isinstance(result, dict) and result.get("raw_response"):
+                        try:
+                            safe_title = "".join(
+                                ch if ch.isalnum() or ch in "-_" else "_"
+                                for ch in book_title
+                            )[:80]
+                            failed_dir = Path.cwd() / "logs" / "failed_chunks"
+                            failed_dir.mkdir(parents=True, exist_ok=True)
+                            failed_path = failed_dir / f"{safe_title}_chunk_{chunk_index}_retry_{retry + 1}.txt"
+                            failed_path.write_text(result["raw_response"], encoding="utf-8", errors="replace")
+                            logger.warning(f"   📝 Chunk {chunk_index} 原始响应已保存: {failed_path}")
+                        except Exception as save_error:
+                            logger.warning(f"   ⚠️ Chunk {chunk_index} 原始响应保存失败: {save_error}")
+
                     delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
                     logger.warning(f"   ⚠️ Chunk {chunk_index} 解析失败: {error_msg}，{delay}秒后重试")
                     await asyncio.sleep(delay)
@@ -435,7 +480,8 @@ class NativeAsyncChunkProcessor:
         book_title: str,
         system_prompt: str,
         chunk_prompt_template: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        local_hints_by_chunk: Optional[Dict[int, object]] = None,
     ) -> List[ChunkResult]:
         """
         并行处理所有 chunks（原生异步）
@@ -446,6 +492,7 @@ class NativeAsyncChunkProcessor:
             system_prompt: 系统提示词
             chunk_prompt_template: chunk 提示词模板
             use_cache: 是否使用缓存
+            local_hints_by_chunk: 本地预处理候选信号映射
 
         Returns:
             List[ChunkResult]: 所有处理结果
@@ -460,7 +507,8 @@ class NativeAsyncChunkProcessor:
                 idx, content, label = chunk
                 logger.info(f"   ▶️ 开始处理 Chunk {idx} [{label}]")
                 return await self.process_single_chunk(
-                    idx, content, book_title, system_prompt, chunk_prompt_template, use_cache
+                    idx, content, book_title, system_prompt, chunk_prompt_template, use_cache,
+                    local_hints_by_chunk=local_hints_by_chunk,
                 )
 
         # 并行启动所有任务
@@ -496,7 +544,8 @@ async def process_book_chunks_native_async(
     book_title: str,
     system_prompt: str,
     chunk_prompt_template: str,
-    max_parallel: int = 8
+    max_parallel: int = 8,
+    local_hints_by_chunk: Optional[Dict[int, object]] = None,
 ) -> List[Dict]:
     """
     原生异步书籍 chunk 处理接口
@@ -508,6 +557,7 @@ async def process_book_chunks_native_async(
         system_prompt: 系统提示词
         chunk_prompt_template: chunk 提示词模板
         max_parallel: 最大并行数
+        local_hints_by_chunk: 本地预处理候选信号映射
 
     Returns:
         List[Dict]: 成功的解析结果列表
@@ -515,7 +565,8 @@ async def process_book_chunks_native_async(
     processor = NativeAsyncChunkProcessor(async_llm_client, max_parallel)
 
     results = await processor.process_chunks_parallel(
-        chunks, book_title, system_prompt, chunk_prompt_template
+        chunks, book_title, system_prompt, chunk_prompt_template,
+        local_hints_by_chunk=local_hints_by_chunk,
     )
 
     # 返回成功的结果
