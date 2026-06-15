@@ -117,6 +117,19 @@ class TestSemanticChunking:
         # 验证：应该按字符切分
         assert len(chunks) >= 1
 
+    def test_merge_small_chunks_respects_target_size(self):
+        """小块合并应接近目标大小，不能把所有小块吞成一个巨块。"""
+        from main import _merge_small_chunks
+
+        chunks = [(i, "测试内容" * 40, f"章节{i}") for i in range(20)]
+
+        merged = _merge_small_chunks(chunks, target_tokens=200, min_tokens=50)
+
+        assert len(merged) > 1
+        assert max(len(content) // 4 for _, content, _ in merged) <= 260
+        assert merged[0][0] == 0
+        assert merged[1][0] != merged[0][0]
+
     def test_chunk_size_estimation(self):
         """测试 token 估算"""
         from main import _semantic_chunking

@@ -102,6 +102,47 @@ class TestPrefixedJSONParsing:
         assert "core_concepts" in result, "应包含 core_concepts 字段"
         assert result["core_concepts"][0]["name"] == "概念1"
 
+    def test_parse_chunk_analysis_with_missing_optional_arrays(self):
+        """测试 chunk 分析缺少可选数组字段时自动补空数组。"""
+        from core.model_output_format_spec import parse_model_output
+
+        raw_response = """{
+  "chapter_summaries": [
+    {"chapter_number": "11", "title": "测试章节", "core_argument": "测试论点"}
+  ],
+  "core_concepts": [],
+  "key_insights": [],
+  "golden_quotes": []
+}"""
+
+        result, success, error = parse_model_output(raw_response, "chunk_analysis")
+
+        assert success, f"解析应成功，但失败: {error}"
+        assert result["key_cases"] == []
+
+    def test_parse_json_with_markdown_bold_key_marker(self):
+        """测试模型在 JSON 键名前误加 Markdown 粗体标记。"""
+        from core.model_output_format_spec import parse_model_output
+
+        raw_response = """{
+  "chapter_summaries": [
+    {
+      "chapter_number": "51",
+      "title": "Saints, Power, and the Will to Power",
+      **"core_argument": "统治者借圣人崇拜获取道德权威"
+    }
+  ],
+  "core_concepts": [],
+  "key_insights": [],
+  "key_cases": [],
+  "golden_quotes": []
+}"""
+
+        result, success, error = parse_model_output(raw_response, "chunk_analysis")
+
+        assert success, f"解析应成功，但失败: {error}"
+        assert result["chapter_summaries"][0]["core_argument"] == "统治者借圣人崇拜获取道德权威"
+
     def test_parse_json_with_thinking_prefix(self):
         """
         RED: 测试解析带思维链前缀的 JSON

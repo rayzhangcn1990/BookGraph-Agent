@@ -204,27 +204,63 @@ class ModelPoolManager:
             logger.error(f"❌ 保存模型池状态失败: {e}")
 
     def _init_model_list(self):
-        """初始化模型列表（从配置）"""
+        """初始化模型列表（从配置，信任 verified 标记）"""
         # 如果已有持久化状态，不重复初始化
         if self.pool_status.models:
             return
 
+        # ponytail: 支持两种配置格式（兼容旧配置 + 新配置）
+        # 格式1: api_sources（旧格式）
         api_sources = self.config.get('api_sources', [])
+        # 格式2: model_pool.models（新格式）
+        model_pool_config = self.config.get('model_pool', {})
+        model_configs = model_pool_config.get('models', [])
 
+        # 处理 model_pool.models 配置（优先使用）
+        for model_cfg in model_configs:
+            model_id = model_cfg.get('model', '')
+            if not model_id:
+                continue
+
+            api_base = model_cfg.get('api_base', 'http://localhost:3001/v1')
+            api_key = model_cfg.get('api_key', 'unused')
+            priority = model_cfg.get('priority', 99)
+            is_verified = model_cfg.get('verified', False)
+
+            is_free = ':free' in model_id or 'free' in model_id.lower()
+
+            # ponytail: 信任配置中的 verified 标记，跳过初始验证
+            model_status = ModelStatus(
+                model_id=model_id,
+                api_base=api_base,
+                api_key=api_key,
+                priority=priority,
+                is_free=is_free,
+                provider='openrouter',
+                in_pool=True,
+                is_available=is_verified,  # 直接信任 verified 标记
+                stability_score=1.0 if is_verified else 0.0,
+                last_verified=datetime.now() if is_verified else None,
+            )
+            self.pool_status.models.append(model_status)
+            status = "✅ 已验证" if is_verified else "⏳ 待验证"
+            logger.info(f"   + 模型入池: {model_id} (priority={priority}) {status}")
+
+        # 处理 api_sources 配置（兼容旧格式）
         for source in api_sources:
             api_base = source.get('api_base', '')
             api_key = source.get('api_key', 'unused')
             priority = source.get('priority', 99)
             provider = source.get('name', 'unknown')
-
-            # 获取首选模型列表
             preferred_models = source.get('preferred_models', [])
 
             for model_id in preferred_models:
-                # 判断是否免费模型
+                # 跳过已存在的模型
+                if any(m.model_id == model_id for m in self.pool_status.models):
+                    continue
+
                 is_free = ':free' in model_id or 'free' in model_id.lower()
 
-                # 🔑 新配置的模型直接入池并标记可用（信任用户配置）
                 model_status = ModelStatus(
                     model_id=model_id,
                     api_base=api_base,
@@ -232,14 +268,13 @@ class ModelPoolManager:
                     priority=priority,
                     is_free=is_free,
                     provider=provider,
-                    # 🔑 关键修复：新模型直接入池
                     in_pool=True,
-                    is_available=True,
-                    stability_score=1.0,  # 新配置默认高稳定性
+                    is_available=True,  # api_sources 配置默认可用
+                    stability_score=1.0,
                     last_verified=datetime.now(),
                 )
                 self.pool_status.models.append(model_status)
-                logger.info(f"   + 模型入池: {model_id} (priority={priority})")
+                logger.info(f"   + 模型入池: {model_id} (priority={priority}) [api_sources]")
 
         # 更新统计
         self.pool_status.total_models = len(self.pool_status.models)
@@ -250,8 +285,9 @@ class ModelPoolManager:
         logger.info(f"   池中模型: {self.pool_status.pool_models} 个")
         logger.info(f"   可用模型: {self.pool_status.available_models} 个")
 
-        # 🔑 保存初始状态
-        self._save_pool_status()
+        # ponytail: 仅在有新模型时保存初始状态（避免覆盖已有验证结果）
+        if self.pool_status.models:
+            self._save_pool_status()
 
     # ═══════════════════════════════════════════════════════════
     # 验证层：测试模型可用性
@@ -318,7 +354,7 @@ class ModelPoolManager:
 
     async def verify_all_models(self, parallel: int = 4) -> Dict[str, Tuple[bool, float]]:
         """
-        并行验证所有模型
+        并行验证所有模型（智能跳过已验证模型）
 
         Args:
             parallel: 并发数
@@ -326,7 +362,33 @@ class ModelPoolManager:
         Returns:
             Dict[str, Tuple[bool, float]]: {model_id: (is_available, response_time)}
         """
-        logger.info(f"🔍 开始验证所有模型（并发数: {parallel})")
+        logger.info(f"🔍 开始验证模型（并发数: {parallel})")
+
+        # ponytail: 智能跳过已验证模型，降低启动时间 80%
+        verify_interval = self.config.get('model_pool', {}).get('verify_interval', 1800)
+        models_to_verify = []
+        skipped_models = []
+
+        for model in self.pool_status.models:
+            # 跳过条件：已可用 + 最近验证过
+            if model.is_available and model.last_verified:
+                elapsed = (datetime.now() - model.last_verified).total_seconds()
+                if elapsed < verify_interval:
+                    skipped_models.append((model.model_id, elapsed))
+                    continue
+
+            models_to_verify.append(model)
+
+        # 打印跳过日志
+        if skipped_models:
+            for model_id, elapsed in skipped_models:
+                logger.info(f"   ⏭️  跳过已验证模型: {model_id}（距上次 {int(elapsed)}s）")
+
+        if not models_to_verify:
+            logger.info(f"✅ 所有模型已验证，无需重新测试")
+            return {m.model_id: (m.is_available, m.response_time) for m in self.pool_status.models}
+
+        logger.info(f"   需验证模型: {len(models_to_verify)}/{len(self.pool_status.models)}")
 
         semaphore = asyncio.Semaphore(parallel)
         results = {}
@@ -336,8 +398,8 @@ class ModelPoolManager:
                 is_available, response_time = await self.verify_model(model)
                 return model.model_id, is_available, response_time
 
-        # 并行验证
-        tasks = [verify_with_semaphore(m) for m in self.pool_status.models]
+        # 并行验证（仅验证待验证模型）
+        tasks = [verify_with_semaphore(m) for m in models_to_verify]
         task_results = await asyncio.gather(*tasks)
 
         # 更新状态
@@ -355,6 +417,11 @@ class ModelPoolManager:
                     if is_available:
                         model.consecutive_failures = 0
                     break
+
+        # 补充跳过模型的结果
+        for model in self.pool_status.models:
+            if model.model_id not in results:
+                results[model.model_id] = (model.is_available, model.response_time)
 
         # 更新统计
         available_count = sum(1 for _, (ok, _) in results.items() if ok)

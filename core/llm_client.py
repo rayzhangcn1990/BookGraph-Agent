@@ -152,13 +152,17 @@ class LLMClient:
                 - max_retries: 最大重试次数
         """
         # 🔑 解析环境变量引用（${VAR_NAME} 格式）
-        self.config = resolve_config_env_vars(config) if config else {}
+        resolved_config = resolve_config_env_vars(config) if config else {}
+        if 'llm' in resolved_config and 'provider' not in resolved_config:
+            resolved_config = resolved_config.get('llm', {}) or {}
+        self.config = resolved_config
         self.provider = self.config.get('provider', 'anthropic')
         self.model = self.config.get('model', 'claude-3-5-sonnet-20241022')
         self.max_tokens = self.config.get('max_tokens', 32768)
         self.temperature = self.config.get('temperature', 0.3)
         self.chunk_size = self.config.get('chunk_size', 50000)
         self.max_retries = self.config.get('max_retries', 3)
+        self.api_base = self.config.get('api_base', '')
 
         # 🔑 模型轮换系统
         self.model_rotation_list: List[str] = []  # 可用模型列表
@@ -931,7 +935,7 @@ class LLMClient:
         """
         规范化 BookGraph 数据，处理 LLM 返回的不规范格式
 
-        🔑 核心修复：填充所有必填字段的默认值，防止 ValidationError
+        🔑 核心修复：补齐结构字段，但不制造占位符内容
 
         Args:
             data: LLM 返回的原始数据
@@ -953,10 +957,10 @@ class LLMClient:
 
         meta = data['metadata']
 
-        # 🔑 必填字段默认值填充
+        # 🔑 必填字段默认值填充：只补结构，不制造“待补充”内容
         meta.setdefault('title', metadata.get('title', 'Unknown'))
         meta.setdefault('author', metadata.get('author', 'Unknown'))
-        meta.setdefault('author_intro', metadata.get('author_intro', '作者简介待补充'))
+        meta.setdefault('author_intro', metadata.get('author_intro', ''))
         meta.setdefault('discipline', metadata.get('discipline', '哲学'))
 
         # 处理 metadata 中的 tuple
@@ -970,17 +974,17 @@ class LLMClient:
             data['time_background'] = {}
 
         tb = data['time_background']
-        tb.setdefault('macro_background', '宏观背景待补充')
-        tb.setdefault('micro_background', '微观背景待补充')
-        tb.setdefault('core_contradiction', '核心矛盾待补充')
+        tb.setdefault('macro_background', '')
+        tb.setdefault('micro_background', '')
+        tb.setdefault('core_contradiction', '')
 
         # 确保 critical_analysis 存在且填充必填字段
         if 'critical_analysis' not in data:
             data['critical_analysis'] = {}
 
         ca = data['critical_analysis']
-        ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
-        ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
+        ca.setdefault('feminist_perspective', '')
+        ca.setdefault('postcolonial_perspective', '')
         ca.setdefault('core_doubts', [])
         ca.setdefault('ethical_boundaries', {})
 
@@ -1008,9 +1012,9 @@ class LLMClient:
                         if 'core_drivers' in item and isinstance(item['core_drivers'], str):
                             # 将逗号分隔的字符串转为数组
                             item['core_drivers'] = [s.strip() for s in item['core_drivers'].replace(',', ',').split('、') if s.strip()]
-                        # 确保其他必填字段存在
-                        item.setdefault('name', item.get('name', '未命名'))
-                        item.setdefault('definition', item.get('definition', '定义待补充'))
+                        # 确保其他必填字段存在，但不填入伪内容
+                        item.setdefault('name', item.get('name', ''))
+                        item.setdefault('definition', item.get('definition', ''))
 
         # 处理 multi_perspectives（应该是对象，LLM 可能返回字符串）
         if 'key_insights' in data and isinstance(data['key_insights'], list):
@@ -1020,11 +1024,11 @@ class LLMClient:
                         # 将字符串转为对象
                         item['multi_perspectives'] = {"其他视角": item['multi_perspectives']}
                     item.setdefault('multi_perspectives', {})
-                    # 确保其他必填字段存在
-                    item.setdefault('title', item.get('title', '未命名洞见'))
-                    item.setdefault('description', item.get('description', '描述待补充'))
-                    item.setdefault('underlying_logic', item.get('underlying_logic', '底层逻辑待补充'))
-                    item.setdefault('controversies', item.get('controversies', '争议待补充'))
+                    # 确保其他必填字段存在，但不填入伪内容
+                    item.setdefault('title', item.get('title', ''))
+                    item.setdefault('description', item.get('description', ''))
+                    item.setdefault('underlying_logic', item.get('underlying_logic', ''))
+                    item.setdefault('controversies', item.get('controversies', ''))
 
         # 处理 core_doubts（应该是对象数组，LLM 可能返回字符串）
         if 'critical_analysis' in data:
@@ -1053,24 +1057,23 @@ class LLMClient:
                         elif isinstance(item['development_stages'], str):
                             item['development_stages'] = [{"name": item['development_stages'], "description": ""}]
 
-        # 🔑 Step 4: 填充嵌套模型必填字段（LLM 经常遗漏）
+        # 🔑 Step 4: 补齐嵌套模型必填字段（LLM 经常遗漏），但不制造伪内容
         nested_defaults = {
             'core_concepts': {
-                'name': '未命名概念', 'definition': '定义待补充', 'deep_meaning': '深层含义待补充',
-                'underlying_logic': '前提假设：[待补充]→推理链条：[待补充]→核心结论：[待补充]',
-                'critical_review': '批判性审视待补充',
+                'name': '', 'definition': '', 'deep_meaning': '',
+                'underlying_logic': '', 'critical_review': '',
             },
             'key_insights': {
-                'title': '未命名洞见', 'description': '描述待补充', 'underlying_logic': '底层逻辑待补充',
-                'controversies': '争议待补充',
+                'title': '', 'description': '', 'underlying_logic': '',
+                'controversies': '',
             },
             'key_cases': {
-                'name': '未命名案例', 'source_chapter': '待补充', 'event_description': '描述待补充',
-                'historical_limitations': '历史局限性待补充',
+                'name': '', 'source_chapter': '', 'event_description': '',
+                'historical_limitations': '',
             },
             'key_quotes': {
-                'text': '待补充', 'chapter': '待补充', 'core_theme': '待补充',
-                'background_context': '待补充', 'underlying_logic': '待补充',
+                'text': '', 'chapter': '', 'core_theme': '',
+                'background_context': '', 'underlying_logic': '',
             },
         }
         for section, defaults in nested_defaults.items():
@@ -1083,11 +1086,11 @@ class LLMClient:
                         for field, default in defaults.items():
                             item.setdefault(field, default)
 
-        # 确保 critical_analysis 子字段有值
+        # 确保 critical_analysis 子字段存在
         if 'critical_analysis' in data and isinstance(data['critical_analysis'], dict):
             ca = data['critical_analysis']
-            ca.setdefault('feminist_perspective', '女性主义视角分析待补充')
-            ca.setdefault('postcolonial_perspective', '后殖民主义视角分析待补充')
+            ca.setdefault('feminist_perspective', '')
+            ca.setdefault('postcolonial_perspective', '')
 
         # 处理 learning_path（应该是对象，各字段为数组，LLM 可能返回字符串）
         if 'learning_path' not in data:
@@ -1178,13 +1181,13 @@ class LLMClient:
                     discipline=metadata.get('discipline', DisciplineType.哲学),
                 ),
                 time_background=TimeBackground(
-                    macro_background="待补充",
-                    micro_background="待补充",
-                    core_contradiction="待补充",
+                    macro_background="",
+                    micro_background="",
+                    core_contradiction="",
                 ),
                 critical_analysis=CriticalAnalysis(
-                    feminist_perspective="待补充",
-                    postcolonial_perspective="待补充",
+                    feminist_perspective="",
+                    postcolonial_perspective="",
                     ethical_boundaries={},
                 ),
             )
@@ -1326,7 +1329,7 @@ class AsyncLLMClient(LLMClient):
 
     async def _call_llm_async(self, messages: List[Dict], max_tokens: int = None) -> str:
         """
-        异步调用 LLM
+        异步调用 LLM（增强错误处理和断路器）
 
         Args:
             messages: 消息列表
@@ -1336,6 +1339,10 @@ class AsyncLLMClient(LLMClient):
             str: LLM 响应文本
         """
         max_tokens = max_tokens or self.max_tokens
+
+        # 🔑 成功后重置失败计数器
+        if hasattr(self, '_consecutive_failures') and self._consecutive_failures > 0:
+            self._consecutive_failures = 0
 
         # 优先使用 AsyncOpenAI
         if self.async_openai_client:
@@ -1362,6 +1369,14 @@ class AsyncLLMClient(LLMClient):
 
             except Exception as e:
                 error_str = str(e)
+                error_type = type(e).__name__
+
+                # 🔑 增强错误日志
+                logger.error(f"❌ AsyncOpenAI 调用失败")
+                logger.error(f"   错误类型: {error_type}")
+                logger.error(f"   错误信息: {error_str[:200]}")
+                logger.error(f"   模型: {self.model}")
+                logger.error(f"   API Base: {self.api_base}")
 
                 # 反馈给模型池管理器
                 if self.model_pool_manager:
@@ -1369,15 +1384,26 @@ class AsyncLLMClient(LLMClient):
                         self.model, success=False
                     )
 
+                # 🔑 断路器：连续失败检查
+                if not hasattr(self, '_consecutive_failures'):
+                    self._consecutive_failures = 0
+
+                self._consecutive_failures += 1
+
+                if self._consecutive_failures >= 3:
+                    logger.warning(f"⚠️  连续失败 {self._consecutive_failures} 次，暂停 60 秒...")
+                    time.sleep(60)
+                    self._consecutive_failures = 0  # 重置计数器
+
                 # 额度耗尽：切换模型
                 if self._is_quota_exhausted(error_str):
                     if self.switch_to_next_model(f"额度耗尽: {self.model}"):
+                        logger.info(f"🔄 切换到备选模型: {self.model}")
                         # 递归重试（已切换模型）
                         return await self._call_llm_async(messages, max_tokens)
 
-                logger.error(f"❌ AsyncOpenAI 调用失败: {error_str[:100]}")
-
                 # 回退到同步调用
+                logger.info("⬇️  回退到同步调用")
                 return self._call_llm(messages, max_tokens)
 
         # 回退到 AsyncAnthropic

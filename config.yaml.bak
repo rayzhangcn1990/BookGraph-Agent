@@ -45,12 +45,43 @@ llm:
   max_retries: 8          # 🔑 增加重试次数到 8
   retry_delay: 15         # 🔑 增加重试延迟到 15 秒（指数退避）
   timeout: 300            # 🔑 增加超时到 300 秒
-  max_parallel: 8         # 🔑 最大并行 chunk 处理数（命令行可覆盖）
 
-  # ponytail: 禁用模型池，仅使用 astron-code-latest 单模型
+  # 模型池配置 - 🔑 启用自动切换
   model_pool:
-    enabled: false         # 🔑 禁用模型池自动切换
-    # models 配置已注释，避免模型池启用时干扰
+    enabled: true          # 🔑 启用模型池
+    auto_verify: true
+    verify_interval: 1800  # 🔑 缩短验证间隔到 30 分钟
+    min_stability: 0.7
+    max_response_time: 45  # 🔑 增加响应时间容忍到 45 秒
+    min_success_count: 2   # 🔑 降低成功阈值到 2 次
+    max_consecutive_failures: 2  # 🔑 降低连续失败阈值到 2 次
+    # 可用模型列表（从 API 端点自动发现，此处仅指定优先级）
+    models:
+      - model: "deepseek/deepseek-chat"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 1
+        verified: true      # 🔑 标记为已验证可用
+      - model: "deepseek-ai/deepseek-v4-pro"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 2
+      - model: "meta-llama/llama-3.3-70b-instruct:free"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 3
+      - model: "nvidia/llama-3.3-nemotron-super-49b-v1"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 4
+      - model: "tencent/hy3-preview:free"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 5
+      - model: "minimax/minimax-m2.5:free"
+        api_base: "http://localhost:3001/v1"
+        api_key: "${FREELLMAPI_KEY}"
+        priority: 6
 
   # 🔑 不使用多源 API，直接使用 Anthropic SDK
 
@@ -60,8 +91,18 @@ improvements:
   two_stage_ingest:
     enabled: true         # 启用后将替代多轮合成中的 Round1‑5
     cache_results: true   # 缓存分析阶段结果 (基于内容哈希)
-  # 本地证据预处理：已禁用（放弃本地 Ollama，统一使用远程模型池）
-  # local_evidence_preprocessor 配置已移除，避免残留配置干扰
+  # 本地证据预处理：使用 NAS Ollama 小模型做短 JSON 候选信号抽取（已禁用，放弃本地 Ollama）
+  local_evidence_preprocessor:
+    enabled: false
+    provider: "ollama"
+    api_base: "http://10.108.1.143:11434"
+    model: "qwen2.5:3b"
+    timeout: 180
+    max_chars: 1200
+    num_predict: 128
+    temperature: 0.0
+    cache_results: true
+    max_parallel: 1
   # 图洞察 (孤立节点、桥节点、稀疏社区)
   graph_insights:
     enabled: true
@@ -75,7 +116,7 @@ improvements:
     embedding_model: "text-embedding-ada-002"
   # 结构化输出 (强制 JSON 输出)
   structured_output:
-    enabled: true           # 使用 OpenAI response_format 强制 JSON 输出
+    enabled: false          # 需要安装 instructor 库
   # 实体消歧 (合并相似概念)
   entity_resolution:
     enabled: false

@@ -124,14 +124,29 @@ async def process_single_book_optimized(
     logger.info(f"📖 开始处理: {book_path.name}")
 
     try:
-        # Step 1: 解析书籍
-        book_parser = BookParser(str(book_path), config.get('parsing', {}))
-        parse_result = book_parser.parse()
+        # Step 0: 初始化 LLM 客户端（提前初始化，用于元数据增强）
+        llm_client = get_llm_client(config)
+
+        # Step 1: 解析书籍 + 元数据增强
+        book_parser = BookParser(
+            str(book_path),
+            config.get('parsing', {}),
+            llm_client=llm_client,  # ponytail: 传入 LLM client 用于 fallback
+        )
+
+        # ponytail: 使用异步方法，支持元数据增强
+        parse_result = await book_parser.parse_with_metadata_enrichment()
 
         if not parse_result.success:
             raise Exception(f"书籍解析失败: {parse_result.error}")
 
         logger.info(f"   ✅ 解析完成: {len(parse_result.content)}字符")
+
+        # ponytail: 打印元数据增强结果
+        if parse_result.metadata.get("author_intro"):
+            logger.info(f"   📚 作者简介已增强 ({len(parse_result.metadata['author_intro'])}字)")
+        if parse_result.metadata.get("source"):
+            logger.info(f"   📊 元数据来源: {parse_result.metadata['source']}")
 
         # Step 2: 分块（语义分块）
         chunks = _semantic_chunking(parse_result, config)
@@ -150,12 +165,17 @@ async def process_single_book_optimized(
             )
 
         # Step 3: 并行处理 chunks（优化核心）
-        llm_client = get_llm_client(config)
+        # ponytail: llm_client 已在 Step 0 初始化，无需重复
         book_title = parse_result.metadata.get('title', book_path.stem)
 
         # 🔑 使用原生异步处理（Phase 3）
         from core.llm_client import get_async_llm_client
         async_llm_client = get_async_llm_client(config)
+
+        # 🔑 检查是否启用结构化输出
+        structured_output_enabled = config.get('improvements', {}).get('structured_output', {}).get('enabled', False)
+        if structured_output_enabled:
+            logger.info("   📋 启用结构化输出（强制 JSON Schema）")
 
         chunk_results = await process_book_chunks_native_async(
             async_llm_client,
@@ -165,6 +185,7 @@ async def process_single_book_optimized(
             CHUNK_ANALYSIS_PROMPT,
             max_parallel,
             local_hints_by_chunk=local_hints_by_chunk,
+            structured_output_enabled=structured_output_enabled,
         )
 
         if not chunk_results:
@@ -758,12 +779,17 @@ def main():
     parser.add_argument("--discipline", default="政治学", help="学科分类")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--batch", action="store_true", help="批量处理模式")
-    parser.add_argument("--parallel", type=int, default=1, help="最大并行数")
+    parser.add_argument("--parallel", type=int, default=None, help="最大并行数（默认从配置读取，配置默认值为 8）")
 
     args = parser.parse_args()
 
     # 加载配置
     config = load_config(args.config)
+
+    # 🔑 max_parallel 优先级：命令行参数 > 配置文件 > 默认值 8
+    if args.parallel is None:
+        args.parallel = config.get('llm', {}).get('max_parallel', 8)
+        logger.info(f"📐 max_parallel 从配置读取: {args.parallel}")
 
     # 清理过期缓存
     get_cache().clear_expired_cache()

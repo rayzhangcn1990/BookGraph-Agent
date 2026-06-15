@@ -3,13 +3,14 @@
 
 核心优化点：
 1. asyncio 并行处理（替代 ThreadPoolExecutor）
-2. 智能重试策略（30→60→90秒指数退避）
+2. 智能重试策略（5→15→45秒指数退避 + Jitter）
 3. 缓存机制（断点续传）
 4. 统一 JSON 解析（三层防护）
 5. 全局客户端复用（避免重复初始化）
 """
 
 import asyncio
+import random
 import json
 import logging
 import time
@@ -21,6 +22,8 @@ from dataclasses import dataclass
 # 导入优化模块
 from core.model_output_format_spec import parse_model_output, get_prompt_for_model
 from utils.parse_cache import get_cache
+# 导入 schema 和结构化输出支持
+from schemas.book_graph_schema import CHUNK_ANALYSIS_JSON_SCHEMA
 
 logger = logging.getLogger("BookGraph-Agent")
 
@@ -76,11 +79,14 @@ class OptimizedChunkProcessor:
         self.cache = get_cache()
 
         # 智能重试配置
-        self.retry_delays = [30, 60, 90]  # 指数退避（秒）
+        self.retry_delays = [5, 15, 45]  # 指数退避（秒）
         self.max_retries = 3
         # 动态限流追踪
         self._consecutive_rate_limits = 0
         self._current_max_parallel = max_parallel
+        # 动态并发恢复追踪
+        self._consecutive_successes = 0
+        self._recovery_threshold = 10  # 连续成功 10 次后恢复并发度
 
     async def process_single_chunk(
         self,
@@ -139,9 +145,10 @@ class OptimizedChunkProcessor:
 
                 if response is None:
                     # 空响应，等待后重试
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 空响应，{delay}秒后重试 ({retry+1}/{self.max_retries})")
-                    await asyncio.sleep(delay)
+                    base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 空响应，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试 ({retry+1}/{self.max_retries})")
+                    await asyncio.sleep(actual_delay)
                     continue
 
                 # Step 4: 统一 JSON 解析（三层防护）
@@ -154,6 +161,15 @@ class OptimizedChunkProcessor:
                     elapsed = (datetime.now() - start_time).total_seconds()
                     logger.info(f"   ✅ Chunk {chunk_index} 完成 ({elapsed:.1f}秒)")
 
+                    # 动态并发恢复：连续成功后逐步恢复并发度
+                    self._consecutive_successes += 1
+                    if (self._consecutive_successes >= self._recovery_threshold 
+                        and self._current_max_parallel < self.max_parallel):
+                        old_parallel = self._current_max_parallel
+                        self._current_max_parallel = min(self._current_max_parallel + 1, self.max_parallel)
+                        logger.info(f"   📈 连续成功 {self._consecutive_successes} 次，恢复并发度至 {self._current_max_parallel}")
+                        self._consecutive_rate_limits = 0  # 重置限流计数
+
                     return ChunkResult(
                         chunk_index=chunk_index,
                         success=True,
@@ -163,9 +179,10 @@ class OptimizedChunkProcessor:
                     )
                 else:
                     # 解析失败，等待后重试
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 解析失败: {error_msg}，{delay}秒后重试")
-                    await asyncio.sleep(delay)
+                    base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 解析失败: {error_msg}，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                    await asyncio.sleep(actual_delay)
 
             except Exception as e:
                 # 异常处理
@@ -175,26 +192,31 @@ class OptimizedChunkProcessor:
                 # 限流处理（429）
                 if '429' in error_str or 'throttling' in error_lower or 'rate limit' in error_lower:
                     self._consecutive_rate_limits += 1
+                    self._consecutive_successes = 0  # 重置成功计数
                     # 动态降低并发度
                     if self._consecutive_rate_limits > 3 and self._current_max_parallel > 1:
                         self._current_max_parallel = max(1, self._current_max_parallel // 2)
                         logger.warning(f"   ⚠️ 检测到持续限流，降低最大并发至 {self._current_max_parallel}")
                         # 更新信号量（将在下次 process_chunks_parallel 重新创建）
                     # 指数退避，并尝试解析 Retry-After
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2
+                    base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2
                     # 尝试从错误消息中提取等待秒数
                     import re
                     match = re.search(r'retry after (\d+)', error_str)
                     if match:
-                        delay = int(match.group(1))
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 限流，{delay}秒后重试")
-                    await asyncio.sleep(delay)
+                        base_delay = int(match.group(1))
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 限流，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                    await asyncio.sleep(actual_delay)
                     continue
 
                 # 其他异常
                 logger.error(f"   ❌ Chunk {chunk_index} 异常: {error_str[:100]}")
                 if retry < self.max_retries - 1:
-                    await asyncio.sleep(self.retry_delays[0])
+                    base_delay = self.retry_delays[0]
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 其他异常，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                    await asyncio.sleep(actual_delay)
                     continue
 
         # 所有重试都失败
@@ -230,6 +252,58 @@ class OptimizedChunkProcessor:
 
         except Exception as e:
             logger.error(f"   ❌ LLM 调用异常: {str(e)[:100]}")
+            return None
+
+
+    async def _call_llm_with_schema_async(
+        self,
+        messages: List[Dict],
+        schema: Dict,
+        max_tokens: int = None
+    ) -> Dict:
+        """
+        异步调用 LLM 并强制 JSON Schema 输出
+
+        使用 OpenAI response_format 强制 LLM 输出符合 schema 的 JSON。
+        
+        Args:
+            messages: 消息列表
+            schema: JSON Schema 字典
+            max_tokens: 最大输出 token 数
+
+        Returns:
+            Dict: 解析后的 JSON 对象，失败返回 None
+        """
+        max_tokens = max_tokens or 16384
+
+        if not self.async_client.async_openai_client:
+            logger.warning("⚠️ AsyncOpenAI 客户端未初始化，无法使用 JSON Schema 模式")
+            return None
+
+        try:
+            import json
+            response = await self.async_client.async_openai_client.chat.completions.create(
+                model=self.async_client.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=self.async_client.temperature,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "ChunkAnalysis",
+                        "schema": schema,
+                        "strict": True
+                    }
+                }
+            )
+
+            content = response.choices[0].message.content
+            if content:
+                return json.loads(content)
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ JSON Schema 模式失败: {str(e)[:100]}")
             return None
 
     async def process_chunks_parallel(
@@ -317,25 +391,33 @@ class NativeAsyncChunkProcessor:
         results = await processor.process_all(chunks)
     """
 
-    def __init__(self, async_llm_client, max_parallel: int = 8):
+    def __init__(self, async_llm_client, max_parallel: int = 8, structured_output_enabled: bool = False):
         """
         初始化处理器
 
         Args:
             async_llm_client: AsyncLLMClient 实例
             max_parallel: 最大并行数
+            structured_output_enabled: 是否启用结构化输出（强制 JSON Schema）
         """
         self.async_client = async_llm_client
         self.max_parallel = max_parallel
         self.cache = get_cache()
+        # 结构化输出开关
+        self.structured_output_enabled = structured_output_enabled
+        # JSON Schema（用于结构化输出）
+        self.chunk_schema = CHUNK_ANALYSIS_JSON_SCHEMA
 
         # 智能重试配置
-        self.retry_delays = [30, 60, 90]
+        self.retry_delays = [5, 15, 45]
         self.max_retries = 3
 
         # 动态限流追踪
         self._consecutive_rate_limits = 0
         self._current_max_parallel = max_parallel
+        # 动态并发恢复追踪
+        self._consecutive_successes = 0
+        self._recovery_threshold = 10  # 连续成功 10 次后恢复并发度
 
     async def process_single_chunk(
         self,
@@ -396,53 +478,101 @@ class NativeAsyncChunkProcessor:
         # Step 3: 智能重试调用（原生异步）
         for retry in range(self.max_retries):
             try:
-                # 🔑 关键：使用原生异步调用
-                response = await self.async_client._call_llm_async(
-                    messages,
-                    max_tokens=16384
-                )
-
-                if response is None:
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 空响应，{delay}秒后重试 ({retry+1}/{self.max_retries})")
-                    await asyncio.sleep(delay)
-                    continue
-
-                # Step 4: 统一 JSON 解析
-                result, success, error_msg = parse_model_output(response)
-
-                if success and result:
-                    # 保存到缓存
-                    self.cache.save_result(book_title, chunk_index, chunk_content, result)
-
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    logger.info(f"   ✅ Chunk {chunk_index} 完成 ({elapsed:.1f}秒)")
-
-                    return ChunkResult(
-                        chunk_index=chunk_index,
-                        success=True,
-                        result=result,
-                        from_cache=False,
-                        elapsed_seconds=elapsed
+                # 🔑 根据配置选择调用方式
+                if self.structured_output_enabled:
+                    # 结构化输出模式：使用 response_format 强制 JSON
+                    result = await self._call_llm_with_schema_async(
+                        messages,
+                        self.chunk_schema,
+                        max_tokens=16384
                     )
-                else:
-                    if isinstance(result, dict) and result.get("raw_response"):
-                        try:
-                            safe_title = "".join(
-                                ch if ch.isalnum() or ch in "-_" else "_"
-                                for ch in book_title
-                            )[:80]
-                            failed_dir = Path.cwd() / "logs" / "failed_chunks"
-                            failed_dir.mkdir(parents=True, exist_ok=True)
-                            failed_path = failed_dir / f"{safe_title}_chunk_{chunk_index}_retry_{retry + 1}.txt"
-                            failed_path.write_text(result["raw_response"], encoding="utf-8", errors="replace")
-                            logger.warning(f"   📝 Chunk {chunk_index} 原始响应已保存: {failed_path}")
-                        except Exception as save_error:
-                            logger.warning(f"   ⚠️ Chunk {chunk_index} 原始响应保存失败: {save_error}")
+                    if result:
+                        # 保存到缓存
+                        self.cache.save_result(book_title, chunk_index, chunk_content, result)
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"   ✅ Chunk {chunk_index} 完成 (结构化输出, {elapsed:.1f}秒)")
 
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 解析失败: {error_msg}，{delay}秒后重试")
-                    await asyncio.sleep(delay)
+                        # 动态并发恢复
+                        self._consecutive_successes += 1
+                        if (self._consecutive_successes >= self._recovery_threshold 
+                            and self._current_max_parallel < self.max_parallel):
+                            self._current_max_parallel = min(self._current_max_parallel + 1, self.max_parallel)
+                            logger.info(f"   📈 ���续成功 {self._consecutive_successes} 次，恢复并发度至 {self._current_max_parallel}")
+                            self._consecutive_rate_limits = 0
+
+                        return ChunkResult(
+                            chunk_index=chunk_index,
+                            success=True,
+                            result=result,
+                            from_cache=False,
+                            elapsed_seconds=elapsed
+                        )
+                    else:
+                        # 结构化输出失败，回退到普通模式
+                        logger.warning(f"   ⚠️ Chunk {chunk_index} 结构化输出失败，回退到普通模式")
+                else:
+                    # 普通模式：使用异步调用 + parse_model_output
+                    response = await self.async_client._call_llm_async(
+                        messages,
+                        max_tokens=16384
+                    )
+
+                    if response is None:
+                        base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
+                        actual_delay = random.uniform(0.8, 1.2) * base_delay
+                        logger.warning(f"   ⚠️ Chunk {chunk_index} 空响应，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试 ({retry+1}/{self.max_retries})")
+                        await asyncio.sleep(actual_delay)
+                        continue
+
+                    # Step 4: 统一 JSON 解析（三层防护）
+                    result, success, error_msg = parse_model_output(response)
+
+                    if success and result:
+                        # 保存到缓存
+                        self.cache.save_result(book_title, chunk_index, chunk_content, result)
+
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"   ✅ Chunk {chunk_index} 完成 ({elapsed:.1f}秒)")
+
+                        # 动态并发恢复：连续成功后逐步恢复并发度
+                        self._consecutive_successes += 1
+                        if (self._consecutive_successes >= self._recovery_threshold 
+                            and self._current_max_parallel < self.max_parallel):
+                            old_parallel = self._current_max_parallel
+                            self._current_max_parallel = min(self._current_max_parallel + 1, self.max_parallel)
+                            logger.info(f"   📈 连续成功 {self._consecutive_successes} 次，恢复并发度至 {self._current_max_parallel}")
+                            self._consecutive_rate_limits = 0  # 重置限流计数
+
+                        return ChunkResult(
+                            chunk_index=chunk_index,
+                            success=True,
+                            result=result,
+                            from_cache=False,
+                            elapsed_seconds=elapsed
+                        )
+                    else:
+                        # 解析失败处理
+                        if isinstance(result, dict) and result.get("raw_response"):
+                            try:
+                                safe_title = "".join(
+                                    ch if ch.isalnum() or ch in "-_" else "_"
+                                    for ch in book_title
+                                )[:80]
+                                failed_dir = Path.cwd() / "logs" / "failed_chunks"
+                                failed_dir.mkdir(parents=True, exist_ok=True)
+                                failed_path = failed_dir / f"{safe_title}_chunk_{chunk_index}_retry_{retry + 1}.txt"
+                                failed_path.write_text(result["raw_response"], encoding="utf-8", errors="replace")
+                                logger.warning(f"   📝 Chunk {chunk_index} 原始响应已保存: {failed_path}")
+                            except Exception as save_error:
+                                logger.warning(f"   ⚠️ Chunk {chunk_index} 原始响应保存失败: {save_error}")
+
+                        base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)]
+                        actual_delay = random.uniform(0.8, 1.2) * base_delay
+                        logger.warning(f"   ⚠️ Chunk {chunk_index} 解析失败: {error_msg}，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                        await asyncio.sleep(actual_delay)
+                        continue
+
+
 
             except Exception as e:
                 error_str = str(e)
@@ -451,18 +581,23 @@ class NativeAsyncChunkProcessor:
                 # 限流处理（429）
                 if '429' in error_str or 'throttling' in error_lower or 'rate limit' in error_lower:
                     self._consecutive_rate_limits += 1
+                    self._consecutive_successes = 0  # 重置成功计数
                     if self._consecutive_rate_limits > 3 and self._current_max_parallel > 1:
                         self._current_max_parallel = max(1, self._current_max_parallel // 2)
                         logger.warning(f"   ⚠️ 检测到持续限流，降低最大并发至 {self._current_max_parallel}")
 
-                    delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2
-                    logger.warning(f"   ⚠️ Chunk {chunk_index} 限流，{delay}秒后重试")
-                    await asyncio.sleep(delay)
+                    base_delay = self.retry_delays[min(retry, len(self.retry_delays) - 1)] * 2
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 限流，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                    await asyncio.sleep(actual_delay)
                     continue
 
                 logger.error(f"   ❌ Chunk {chunk_index} 异常: {error_str[:100]}")
                 if retry < self.max_retries - 1:
-                    await asyncio.sleep(self.retry_delays[0])
+                    base_delay = self.retry_delays[0]
+                    actual_delay = random.uniform(0.8, 1.2) * base_delay
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 其他异常，Jitter 延迟: {actual_delay:.1f}秒 (基准 {base_delay}s) 后重试")
+                    await asyncio.sleep(actual_delay)
                     continue
 
         # 所有重试都失败
@@ -473,6 +608,58 @@ class NativeAsyncChunkProcessor:
             error="重试耗尽",
             elapsed_seconds=elapsed
         )
+
+
+    async def _call_llm_with_schema_async(
+        self,
+        messages: List[Dict],
+        schema: Dict,
+        max_tokens: int = None
+    ) -> Dict:
+        """
+        异步调用 LLM 并强制 JSON Schema 输出
+
+        使用 OpenAI response_format 强制 LLM 输出符合 schema 的 JSON。
+        
+        Args:
+            messages: 消息列表
+            schema: JSON Schema 字典
+            max_tokens: 最大输出 token 数
+
+        Returns:
+            Dict: 解析后的 JSON 对象，失败返回 None
+        """
+        max_tokens = max_tokens or 16384
+
+        if not self.async_client.async_openai_client:
+            logger.warning("⚠️ AsyncOpenAI 客户端未初始化，无法使用 JSON Schema 模式")
+            return None
+
+        try:
+            import json
+            response = await self.async_client.async_openai_client.chat.completions.create(
+                model=self.async_client.model,
+                messages=messages,
+                max_tokens=max_tokens,
+                temperature=self.async_client.temperature,
+                response_format={
+                    "type": "json_schema",
+                    "json_schema": {
+                        "name": "ChunkAnalysis",
+                        "schema": schema,
+                        "strict": True
+                    }
+                }
+            )
+
+            content = response.choices[0].message.content
+            if content:
+                return json.loads(content)
+            return None
+
+        except Exception as e:
+            logger.error(f"❌ JSON Schema 模式失败: {str(e)[:100]}")
+            return None
 
     async def process_chunks_parallel(
         self,
@@ -546,6 +733,7 @@ async def process_book_chunks_native_async(
     chunk_prompt_template: str,
     max_parallel: int = 8,
     local_hints_by_chunk: Optional[Dict[int, object]] = None,
+    structured_output_enabled: bool = False,
 ) -> List[Dict]:
     """
     原生异步书籍 chunk 处理接口
@@ -558,11 +746,16 @@ async def process_book_chunks_native_async(
         chunk_prompt_template: chunk 提示词模板
         max_parallel: 最大并行数
         local_hints_by_chunk: 本地预处理候选信号映射
+        structured_output_enabled: 是否启用结构化输出（强制 JSON Schema）
 
     Returns:
         List[Dict]: 成功的解析结果列表
     """
-    processor = NativeAsyncChunkProcessor(async_llm_client, max_parallel)
+    processor = NativeAsyncChunkProcessor(
+        async_llm_client,
+        max_parallel,
+        structured_output_enabled=structured_output_enabled
+    )
 
     results = await processor.process_chunks_parallel(
         chunks, book_title, system_prompt, chunk_prompt_template,

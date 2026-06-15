@@ -310,6 +310,10 @@ def repair_truncated_json(json_str: str) -> str:
     json_str = re.sub(r'^```\s*', '', json_str)
     json_str = re.sub(r'\s*```$', '', json_str)
 
+    # 🔑 新增 Step 0.05: 移除 JSON 键名前后的 Markdown 粗体标记
+    json_str = re.sub(r'\*\*(\s*"[^"]+"\s*:)', r'\1', json_str)
+    json_str = re.sub(r'("[^"]+"\s*:)\*\*', r'\1', json_str)
+
     # 🔑 新增 Step 0.1: 移除注释行（以 # 开头的行）
     lines = json_str.split('\n')
     non_comment_lines = [line for line in lines if not line.strip().startswith('#')]
@@ -558,6 +562,11 @@ def parse_model_output(content: str, field_type: str = "chunk_analysis", model_i
 
     # Step 4: 规范化字段名
     result = normalize_field_names(result)
+
+    # Step 4.5: chunk 分析允许部分字段缺失，统一补为空数组
+    if field_type == "chunk_analysis":
+        for field in REQUIRED_FIELDS.get(field_type, []):
+            result.setdefault(field, [])
 
     # Step 5: 验证必要字段（使用正确的 field_type）
     is_valid, missing = validate_required_fields(result, field_type)

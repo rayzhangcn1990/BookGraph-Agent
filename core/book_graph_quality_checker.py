@@ -403,6 +403,14 @@ class BookGraphQualityChecker:
             warnings.append("后殖民主义视角含占位符/模板内容")
 
         # ═══════════════════════════════════════════════════════════
+        # 检查 9: 结构完整性与信息密度（非关键词质量门）
+        # ═══════════════════════════════════════════════════════════
+
+        structural_issues = self._check_structural_quality(book_graph_data)
+        stats['structural_issues'] = structural_issues
+        issues.extend(structural_issues)
+
+        # ═══════════════════════════════════════════════════════════
         # 计算总分
         # ═══════════════════════════════════════════════════════════
 
@@ -540,6 +548,82 @@ class BookGraphQualityChecker:
             if field not in data or not data[field]:
                 missing.append(field)
         return missing
+
+    def _has_substantive_text(self, value, min_length: int = 20) -> bool:
+        """检查文本是否有足够信息量。"""
+        return isinstance(value, str) and len(value.strip()) >= min_length
+
+    def _check_structural_quality(self, data: Dict) -> List[str]:
+        """检查结构完整性、信息密度和证据约束，避免只靠关键词匹配。"""
+        issues = []
+
+        critical = data.get('critical_analysis', {})
+        ethical = critical.get('ethical_boundaries', {}) if isinstance(critical, dict) else {}
+        if not isinstance(ethical, dict) or not (
+            self._has_substantive_text(ethical.get('reasonable'))
+            and self._has_substantive_text(ethical.get('dangerous'))
+        ):
+            issues.append("伦理边界缺少合理应用区间和危险应用区间的实质内容")
+
+        learning_path = data.get('learning_path', {})
+        required_learning_stages = ['beginner', 'intermediate', 'advanced', 'practice']
+        substantive_stages = 0
+        if isinstance(learning_path, dict):
+            for stage in required_learning_stages:
+                items = learning_path.get(stage, [])
+                if isinstance(items, list) and any(self._has_substantive_text(item, 8) for item in items):
+                    substantive_stages += 1
+        if substantive_stages < 2:
+            issues.append("学习路径缺少分阶段的实质建议")
+
+        book_network = data.get('book_network', {})
+        if not isinstance(book_network, dict) or not any(
+            self._has_substantive_text(book) and self._has_substantive_text(relation)
+            for book, relation in book_network.items()
+        ):
+            issues.append("关联书籍网络缺少有效关联书籍和关联维度说明")
+
+        weak_insights = []
+        for insight in data.get('key_insights', []):
+            if not isinstance(insight, dict):
+                weak_insights.append(str(insight)[:30])
+                continue
+            if not self._has_substantive_text(insight.get('description'), 30):
+                weak_insights.append(insight.get('title', '未命名洞见'))
+        if weak_insights:
+            issues.append(f"关键洞见缺少核心内容描述：{', '.join(weak_insights[:3])}")
+
+        weak_cases = []
+        for case in data.get('key_cases', []):
+            if not isinstance(case, dict):
+                weak_cases.append(str(case)[:30])
+                continue
+            if not (
+                self._has_substantive_text(case.get('name'), 4)
+                and case.get('name') != '未命名'
+                and self._has_substantive_text(case.get('source_chapter'), 2)
+                and self._has_substantive_text(case.get('event_description'), 40)
+            ):
+                weak_cases.append(case.get('name', '未命名案例'))
+        if weak_cases:
+            issues.append(f"关键案例缺少名称、来源或事件描述证据：{', '.join(weak_cases[:3])}")
+
+        weak_quotes = []
+        for quote in data.get('key_quotes', []):
+            if not isinstance(quote, dict):
+                weak_quotes.append(str(quote)[:30])
+                continue
+            if not (
+                self._has_substantive_text(quote.get('text'), 10)
+                and self._has_substantive_text(quote.get('chapter'), 2)
+                and self._has_substantive_text(quote.get('background_context'), 20)
+                and self._has_substantive_text(quote.get('underlying_logic'), 20)
+            ):
+                weak_quotes.append(quote.get('text', '未命名金句')[:30])
+        if weak_quotes:
+            issues.append(f"金句萃取缺少来源章节、时代背景或底层逻辑证据：{', '.join(weak_quotes[:3])}")
+
+        return issues
 
     def _has_placeholder(self, obj: Dict) -> bool:
         """检查对象是否有占位符"""

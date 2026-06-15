@@ -31,10 +31,17 @@ class TestW2NERRecognizer:
     def test_load_entity_dict_from_config(self):
         """测试从配置文件加载词典"""
         recognizer = W2NERRecognizer()
-        # 应包含配置文件中的实体
-        assert "基辛格" in recognizer.entity_dict
-        assert "霍布斯" in recognizer.entity_dict
-        assert "利维坦" in recognizer.entity_dict
+        # 应包含配置文件中的实体类型
+        assert "人物" in recognizer.entity_dict
+        assert "著作" in recognizer.entity_dict
+
+        # 应包含具体的实体
+        all_entities = []
+        for entities in recognizer.entity_dict.values():
+            all_entities.extend(entities)
+        assert "基辛格" in all_entities
+        assert "霍布斯" in all_entities
+        assert "利维坦" in all_entities
 
     def test_recognize_basic(self):
         """测试基本实体识别"""
