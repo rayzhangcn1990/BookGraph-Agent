@@ -76,6 +76,11 @@ improvements:
   # 结构化输出 (强制 JSON 输出)
   structured_output:
     enabled: true           # 使用 OpenAI response_format 强制 JSON 输出
+  # 四种摘要策略 (hierarchical/thematic/adaptive/critical)
+  summarization_strategy:
+    enabled: true
+    default_strategy: "adaptive"  # 默认自动选择策略
+    # 可选值: hierarchical, thematic, adaptive, critical
   # 实体消歧 (合并相似概念)
   entity_resolution:
     enabled: false
