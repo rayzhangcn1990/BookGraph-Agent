@@ -406,9 +406,10 @@ class BookGraphQualityChecker:
         # 检查 9: 结构完整性与信息密度（非关键词质量门）
         # ═══════════════════════════════════════════════════════════
 
-        structural_issues = self._check_structural_quality(book_graph_data)
+        structural_issues, structural_warnings = self._check_structural_quality(book_graph_data)
         stats['structural_issues'] = structural_issues
         issues.extend(structural_issues)
+        warnings.extend(structural_warnings)
 
         # ═══════════════════════════════════════════════════════════
         # 计算总分
@@ -553,9 +554,10 @@ class BookGraphQualityChecker:
         """检查文本是否有足够信息量。"""
         return isinstance(value, str) and len(value.strip()) >= min_length
 
-    def _check_structural_quality(self, data: Dict) -> List[str]:
+    def _check_structural_quality(self, data: Dict) -> Tuple[List[str], List[str]]:
         """检查结构完整性、信息密度和证据约束，避免只靠关键词匹配。"""
         issues = []
+        warnings = []
 
         critical = data.get('critical_analysis', {})
         ethical = critical.get('ethical_boundaries', {}) if isinstance(critical, dict) else {}
@@ -623,7 +625,7 @@ class BookGraphQualityChecker:
         if weak_quotes:
             issues.append(f"金句萃取缺少来源章节、时代背景或底层逻辑证据：{', '.join(weak_quotes[:3])}")
 
-        return issues
+        return issues, warnings
 
     def _has_placeholder(self, obj: Dict) -> bool:
         """检查对象是否有占位符"""
