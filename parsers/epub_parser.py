@@ -138,6 +138,95 @@ class EpubParser(BaseParser):
 
     def _extract_chapters(self) -> List[Dict]:
         """
+        提取章节内容（按照书脊顺序）
+
+        P2优化：增强 OPF Spine 解析，确保章节顺序正确
+
+        Returns:
+            List[Dict]: 章节列表（包含 title, content, chapter_number）
+        """
+        chapters = []
+
+        if not self.book:
+            return chapters
+
+        # 🗝️ P2优化：优先使用 OPF Spine 顺序
+        # 参考 ai-book-summarizer 项目的 Spine 解析模式
+        spine_order = self._get_spine_order()
+
+        if spine_order:
+            # 按照 Spine 顺序提取章节
+            for index, item_id in enumerate(spine_order):
+                item = self.book.get_item_with_id(item_id)
+                if item and item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    chapter = self._parse_chapter_item(item, index + 1)
+                    if chapter:
+                        chapters.append(chapter)
+        else:
+            # 回退：使用原有逻辑（遍历所有 item）
+            logger.warning("未找到 Spine 顺序，使用默认遍历逻辑")
+            chapter_number = 0
+            for item in self.book.get_items():
+                if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    chapter_number += 1
+                    chapter = self._parse_chapter_item(item, chapter_number)
+                    if chapter:
+                        chapters.append(chapter)
+
+        return chapters
+
+    def _get_spine_order(self) -> List[str]:
+        """
+        获取 OPF Spine 顺序（确保章节顺序正确）
+
+        Returns:
+            List[str]: Spine item ID 列表（按顺序）
+        """
+        try:
+            # 尝试从 EPUB Spine 获取顺序
+            spine = self.book.spine
+            if spine:
+                # spine 格式: [(idref, linear), ...]
+                return [item[0] if isinstance(item, tuple) else item for item in spine]
+        except Exception as e:
+            logger.warning(f"获取 Spine 顺序失败: {e}")
+
+        return []
+
+    def _parse_chapter_item(self, item, chapter_number: int) -> Optional[Dict]:
+        """
+        解析单个章节 item
+
+        Args:
+            item: EPUB item
+            chapter_number: 章节编号
+
+        Returns:
+            Optional[Dict]: 章节数据（如果有效）
+        """
+        try:
+            content = item.get_content()
+            soup = BeautifulSoup(content, 'html.parser')
+
+            # 提取标题
+            title = self._extract_chapter_title(soup)
+
+            # 提取文本内容
+            text_content = self._extract_text_content(soup)
+
+            # 跳过空章节或过短章节
+            if len(text_content) < 100:
+                return None
+
+            return {
+                "title": title,
+                "content": text_content,
+                "chapter_number": chapter_number
+            }
+        except Exception as e:
+            logger.warning(f"解析章节 {chapter_number} 失败: {e}")
+            return None
+        """
         按照书脊顺序提取章节内容
         
         Returns:
