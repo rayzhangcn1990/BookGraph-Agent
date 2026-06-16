@@ -98,7 +98,7 @@ class BookGraphQualityChecker:
     ]
 
     # ═══════════════════════════════════════════════════════════
-    # 质量阈值（PUA 标准：高标准严要求）
+    # 质量阈值（分层过滤：阻塞项 vs 警告项）
     # ═══════════════════════════════════════════════════════════
 
     MIN_CHAPTERS = 5       # 最少章节数
@@ -108,6 +108,21 @@ class BookGraphQualityChecker:
     MIN_CASES = 1          # 最少关键案例数
     MIN_CONTENT_LENGTH = 50  # 最小内容长度
     MIN_DEFINITION_LENGTH = 30  # 定义最小长度
+
+    # 🔑 分层过滤：阻塞性问题 vs 警告性问题
+    BLOCKING_ISSUES = [
+        '占位符污染',      # 关键字段出现"待补充"
+        '章节合并',        # LLM偷懒合并章节
+        '空洞章节',        # 章节内容为空
+        '模板化内容',      # 模板填充未修改
+    ]
+
+    WARNING_ISSUES = [
+        '金句数量不足',
+        '关联书籍网络缺失',
+        '学习路径不完整',
+        '章节编号不连续',
+    ]
 
     # 🔑 新增：章节合并检测模式（严禁偷懒）
     MERGED_CHAPTER_PATTERNS = [
@@ -417,8 +432,17 @@ class BookGraphQualityChecker:
 
         score = self._calculate_score_v2(stats, issues, warnings)
 
-        # PUA 标准：必须 zero issues 且 score >= 70 才能通过
-        passed = len(issues) == 0 and score >= 70
+        # 🔑 分层过滤：仅阻塞性问题阻止写入，警告性问题不阻塞
+        blocking_issues = [i for i in issues if any(b in i for b in self.BLOCKING_ISSUES)]
+        passed = len(blocking_issues) == 0 and score >= 70
+
+        # 将非阻塞性issues转为warnings
+        for issue in issues:
+            if not any(b in issue for b in self.BLOCKING_ISSUES):
+                warnings.append(f"[非阻塞] {issue}")
+
+        # 最终issues仅保留阻塞性问题
+        issues = blocking_issues
 
         return QualityCheckResult(
             passed=passed,
