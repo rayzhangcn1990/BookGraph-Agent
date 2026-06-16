@@ -37,7 +37,10 @@ from core.obsidian_writer import ObsidianWriter
 from core.optimized_chunk_processor import process_book_chunks_native_async
 from core.model_output_format_spec import parse_model_output
 from core.local_evidence_preprocessor import LocalEvidencePreprocessor
+from core.global_concurrency_pool import get_concurrency_pool, limit_concurrency
+from core.quality_gate import get_quality_gate, QualityGateError
 from utils.parse_cache import get_cache
+from utils.json_knowledge_persistence import get_knowledge_base
 from utils.logger import setup_logger
 
 logger = setup_logger("BookGraph-Optimized")
@@ -124,8 +127,25 @@ async def process_single_book_optimized(
     logger.info(f"📖 开始处理: {book_path.name}")
 
     try:
-        # Step 0: 初始化 LLM 客户端（提前初始化，用于元数据增强）
+        # Step 0: 初始化全局并发池 + 质量门控
+        global_concurrency_config = config.get('improvements', {}).get('global_concurrency', {})
+        if global_concurrency_config.get('enabled', False):
+            pool = get_concurrency_pool(max_workers=global_concurrency_config.get('max_workers', 4))
+            logger.info(f"   🔧 全局并发池已启用 (max_workers={pool._current_max_parallel})")
+
+        quality_gate_config = config.get('improvements', {}).get('quality_gate', {})
+        if quality_gate_config.get('enabled', False):
+            gate = get_quality_gate(quality_gate_config)
+            logger.info(f"   🛡️ 质量门控已启用 (阈值={gate.config.threshold}分)")
+
+        # 初始化 LLM 客户端（提前初始化，用于元数据增强）
         llm_client = get_llm_client(config)
+
+        # 初始化 JSON 知识库
+        kb_config = config.get('improvements', {}).get('json_knowledge_base', {})
+        if kb_config.get('enabled', False):
+            kb = get_knowledge_base()
+            logger.info(f"   📚 JSON知识库已启用")
 
         # Step 1: 解析书籍 + 元数据增强
         book_parser = BookParser(
@@ -338,12 +358,35 @@ async def process_single_book_optimized(
             logger.error("   ❌ 质量检查不通过: %s", quality_path)
             raise QualityGateError(f"质量检查不通过，已阻止写入: {quality_path}")
 
-        # Step 6: 写入 Obsidian
+        # Step 6: 写入 Obsidian + 导出器
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
         graph_generator = GraphGenerator(config)
 
         markdown_content = graph_generator.generate_book_graph_markdown(book_graph)
         output_path = obsidian_writer.write_book_graph(book_graph, markdown_content)
+
+        # 导出器 (如果启用)
+        exporters_config = config.get('improvements', {}).get('exporters', {})
+        if exporters_config.get('enabled', False):
+            try:
+                from exporters.mindmap_exporter import MindmapExporter
+                from exporters.json_exporter import JSONExporter
+
+                # 思维导图导出
+                if exporters_config.get('mindmap', {}).get('enabled', True):
+                    mindmap_exporter = MindmapExporter()
+                    mindmap_path = output_path.with_suffix('.mindmap.md')
+                    mindmap_exporter.export_to_file(book_graph.model_dump() if hasattr(book_graph, 'model_dump') else book_graph, mindmap_path)
+                    logger.info(f"   ✅ 思维导图: {mindmap_path}")
+
+                # JSON导出
+                if exporters_config.get('json', {}).get('enabled', True):
+                    json_exporter = JSONExporter()
+                    json_path = output_path.with_suffix('.json')
+                    json_exporter.export_to_file(book_graph.model_dump() if hasattr(book_graph, 'model_dump') else book_graph, json_path)
+                    logger.info(f"   ✅ JSON导出: {json_path}")
+            except Exception as e:
+                logger.warning(f"   ⚠️ 导出器执行失败: {e}")
 
         # 图洞察 (如果启用)
         insights_enabled = config.get('improvements', {}).get('graph_insights', {}).get('enabled', False)

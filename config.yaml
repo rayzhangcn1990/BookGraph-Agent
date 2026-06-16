@@ -104,6 +104,19 @@ improvements:
     dynamic_adjustment: true     # 动态并发度调整（根据限流状态自适应）
     recovery_threshold: 10      # 连续成功10次后恢复并发度
 
+  # JSON知识库配置 (P0优化)
+  json_knowledge_base:
+    enabled: true
+    db_path: ".cache/knowledge_base.json"
+
+  # 导出器配置 (P2优化)
+  exporters:
+    enabled: true
+    mindmap:
+      enabled: true              # 思维导图导出 (Mermaid格式)
+    json:
+      enabled: true              # JSON结构化导出
+
 batch:
   max_workers: 4
 
