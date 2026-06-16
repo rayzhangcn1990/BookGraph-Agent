@@ -4,6 +4,7 @@ EPUB Parser - EPUB 格式书籍解析器
 使用 ebooklib 解析 EPUB 结构，提取章节内容和元数据。
 """
 
+import logging
 from typing import Dict, List, Optional
 from pathlib import Path
 from bs4 import BeautifulSoup
@@ -11,6 +12,8 @@ import ebooklib
 from ebooklib import epub
 
 from .base_parser import BaseParser, ParseResult
+
+logger = logging.getLogger("BookGraph-Agent")
 
 
 class EpubParser(BaseParser):
@@ -226,33 +229,27 @@ class EpubParser(BaseParser):
         except Exception as e:
             logger.warning(f"解析章节 {chapter_number} 失败: {e}")
             return None
-        """
-        按照书脊顺序提取章节内容
-        
-        Returns:
-            List[Dict]: 章节列表，每章包含{chapter_id, title, content}
-        """
-        chapters = []
-        
-        if not self.book:
-            return chapters
-        
-        # 按照书脊顺序遍历文档
-        chapter_id = 1
-        for item in self.book.spine:
-            if isinstance(item, tuple):
-                item = item[0]
-            
-            # 获取实际的项目
-            doc_item = self.book.get_item_with_id(item) if isinstance(item, str) else item
-            
-            if doc_item and doc_item.get_type() == ebooklib.ITEM_DOCUMENT:
-                chapter_data = self._process_document(doc_item, chapter_id)
-                if chapter_data:
-                    chapters.append(chapter_data)
-                    chapter_id += 1
-        
-        return chapters
+
+    def _extract_chapter_title(self, soup: BeautifulSoup) -> str:
+        """提取章节标题"""
+        # 尝试从 h1/h2/h3 标签提取
+        for tag in ['h1', 'h2', 'h3']:
+            heading = soup.find(tag)
+            if heading:
+                text = heading.get_text(strip=True)
+                if text and len(text) > 2:
+                    return text
+        return ""
+
+    def _extract_text_content(self, soup: BeautifulSoup) -> str:
+        """提取文本内容"""
+        # 移除 script 和 style 标签
+        for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
+            tag.decompose()
+
+        # 提取文本
+        text = soup.get_text(separator='\n', strip=True)
+        return text
 
     def _process_document(self, doc_item, chapter_id: int) -> Optional[Dict]:
         """
