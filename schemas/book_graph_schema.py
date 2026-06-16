@@ -40,7 +40,7 @@ class BookMetadata(BaseModel):
     title: str = Field(..., description="书名")
     author: str = Field(..., description="作者")
     author_intro: str = Field(..., description="作者简介")
-    year_published: Optional[str] = Field(None, description="出版年份")
+    year_published: Optional[Union[str, int]] = Field(None, description="出版年份（支持字符串或整数）")
     category: List[str] = Field(default_factory=list, description="分类标签")
     discipline: DisciplineType = Field(..., description="所属一级学科")
     sub_discipline: Optional[str] = Field(None, description="所属二级子学科（如：政治哲学属于政治学）")
