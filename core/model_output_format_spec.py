@@ -514,42 +514,83 @@ def parse_model_output(content: str, field_type: str = "chunk_analysis", model_i
         try:
             result = json.loads(content)
         except json.JSONDecodeError:
-            # 提取第一个完整 JSON 对象
-            json_start = content.find('{')
-            if json_start < 0:
-                # 🔑 没有JSON结构，直接返回raw_response
-                logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
-                return {
-                    "raw_response": content[:5000],
-                    "extraction_status": "partial",
-                    "error": "未找到JSON结构"
-                }, False, "未找到JSON结构，已保存raw_response"
-
-            # 使用深度匹配找完整 JSON
-            depth = 0
-            json_end = json_start
-            for i, c in enumerate(content[json_start:], json_start):
-                if c == '{':
-                    depth += 1
-                elif c == '}':
-                    depth -= 1
-                    if depth == 0:
-                        json_end = i + 1
-                        break
-
-            json_str = content[json_start:json_end]
-
-            # 尝试解析
+            # 🔑 新增：尝试使用json_repair库（更可靠的修复）
             try:
-                result = json.loads(json_str)
-            except json.JSONDecodeError as e:
-                # 🔑 Fallback: 保存raw_response，不丢弃！
-                logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
-                return {
-                    "raw_response": content[:5000],  # 保存前5000字符
-                    "extraction_status": "partial",
-                    "error": str(e)[:100]
-                }, False, f"JSON 解析失败，已保存raw_response"
+                import json_repair
+                result = json_repair.loads(content)
+                logger.info("   ✅ 使用json_repair库成功修复JSON")
+            except ImportError:
+                # json_repair未安装，回退到传统方法
+                # 提取第一个完整 JSON 对象
+                json_start = content.find('{')
+                if json_start < 0:
+                    # 🔑 没有JSON结构，直接返回raw_response
+                    logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
+                    return {
+                        "raw_response": content[:5000],
+                        "extraction_status": "partial",
+                        "error": "未找到JSON结构"
+                    }, False, "未找到JSON结构，已保存raw_response"
+
+                # 使用深度匹配找完整 JSON
+                depth = 0
+                json_end = json_start
+                for i, c in enumerate(content[json_start:], json_start):
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            json_end = i + 1
+                            break
+
+                json_str = content[json_start:json_end]
+
+                # 尝试解析
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    # 🔑 Fallback: 保存raw_response，不丢弃！
+                    logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
+                    return {
+                        "raw_response": content[:5000],  # 保存前5000字符
+                        "extraction_status": "partial",
+                        "error": str(e)[:100]
+                    }, False, f"JSON 解析失败，已保存raw_response"
+
+            except Exception as e:
+                # json_repair库也失败了，回退到传统方法
+                json_start = content.find('{')
+                if json_start < 0:
+                    logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
+                    return {
+                        "raw_response": content[:5000],
+                        "extraction_status": "partial",
+                        "error": "未找到JSON结构"
+                    }, False, "未找到JSON结构，已保存raw_response"
+
+                depth = 0
+                json_end = json_start
+                for i, c in enumerate(content[json_start:], json_start):
+                    if c == '{':
+                        depth += 1
+                    elif c == '}':
+                        depth -= 1
+                        if depth == 0:
+                            json_end = i + 1
+                            break
+
+                json_str = content[json_start:json_end]
+
+                try:
+                    result = json.loads(json_str)
+                except json.JSONDecodeError as e:
+                    logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
+                    return {
+                        "raw_response": content[:5000],
+                        "extraction_status": "partial",
+                        "error": str(e)[:100]
+                    }, False, f"JSON 解析失败，已保存raw_response"
 
     except Exception as e:
         # 🔑 Fallback: 异常时也保存raw_response

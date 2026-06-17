@@ -86,7 +86,7 @@ class OptimizedChunkProcessor:
         self._current_max_parallel = max_parallel
         # 动态并发恢复追踪
         self._consecutive_successes = 0
-        self._recovery_threshold = 10  # 连续成功 10 次后恢复并发度
+        self._recovery_threshold = 5  # 🔑 优化：从10降低到5，加快限流缓解后的并发度恢复速度
 
     async def process_single_chunk(
         self,
@@ -117,6 +117,23 @@ class OptimizedChunkProcessor:
         if use_cache:
             cached_result = self.cache.get_cached_result(book_title, chunk_index, chunk_content)
             if cached_result:
+                # 🔑 新增：验证缓存数据有效性（OptimizedChunkProcessor版本）
+                from core.model_output_format_spec import validate_required_fields
+                is_valid, missing_fields = validate_required_fields(cached_result, field_type="chunk_analysis")
+
+                if is_valid:
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"   💾 Chunk {chunk_index} 缓存命中且有效")
+                    return ChunkResult(
+                        chunk_index=chunk_index,
+                        success=True,
+                        result=cached_result,
+                        from_cache=True,
+                        elapsed_seconds=elapsed
+                    )
+                else:
+                    # 缓存数据无效，清除并重新处理
+                    logger.warning(f"   ⚠️ Chunk {chunk_index} 缓存数据无效（缺失字段: {missing_fields}），清除缓存")
                 elapsed = (datetime.now() - start_time).total_seconds()
                 return ChunkResult(
                     chunk_index=chunk_index,
@@ -219,12 +236,80 @@ class OptimizedChunkProcessor:
                     await asyncio.sleep(actual_delay)
                     continue
 
-        # 所有重试都失败
+        # 所有重试都失败，尝试降级策略（OptimizedChunkProcessor版本）
+        logger.warning(f"⚠️ Chunk {chunk_index} 重试耗尽，尝试降级策略")
+
+        # 🔑 降级策略1: 降低max_tokens（减少截断概率）
+        try:
+            logger.info(f"   🔧 降级策略1: 降低max_tokens至50%")
+            response = await asyncio.to_thread(
+                self._call_llm_sync,
+                system_prompt,
+                prompt,
+                max_tokens=max(2048, 16384 // 2)
+            )
+            if response:
+                result, success, error_msg = parse_model_output(response)
+                if success and result:
+                    self.cache.save_result(book_title, chunk_index, chunk_content, result)
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"   ✅ Chunk {chunk_index} 降级策略1成功")
+                    return ChunkResult(
+                        chunk_index=chunk_index,
+                        success=True,
+                        result=result,
+                        from_cache=False,
+                        elapsed_seconds=elapsed
+                    )
+        except Exception as e:
+            logger.warning(f"   ⚠️ 降级策略1失败: {str(e)[:50]}")
+
+        # 🔑 降级策略2: 简化prompt（只要求核心字段）
+        try:
+            logger.info(f"   🔧 降级策略2: 简化prompt")
+            simplified_prompt = f"""书名: {book_title}
+
+章节内容（节选）:
+{chunk_content[:2000]}
+
+请提取以下信息（JSON格式）：
+1. chapter_summaries: 章节摘要数组
+2. core_concepts: 核心概念数组
+
+输出格式:
+{{"chapter_summaries": [...], "core_concepts": [...]}}"""
+
+            response = await asyncio.to_thread(
+                self._call_llm_sync,
+                "你是一个书籍内容分析助手，请按照用户要求提取关键信息，以JSON格式输出。",
+                simplified_prompt,
+                max_tokens=4096
+            )
+            if response:
+                result, success, error_msg = parse_model_output(response)
+                if result:
+                    # 补齐缺失字段
+                    for field in ["chapter_summaries", "core_concepts", "key_insights", "key_cases", "golden_quotes"]:
+                        result.setdefault(field, [])
+                    elapsed = (datetime.now() - start_time).total_seconds()
+                    logger.info(f"   ✅ Chunk {chunk_index} 降级策略2成功")
+                    return ChunkResult(
+                        chunk_index=chunk_index,
+                        success=True,
+                        result=result,
+                        from_cache=False,
+                        elapsed_seconds=elapsed
+                    )
+        except Exception as e:
+            logger.warning(f"   ⚠️ 降级策略2失败: {str(e)[:50]}")
+
+        # 最终失败
         elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"   ❌ Chunk {chunk_index} 所有降级策略均失败")
         return ChunkResult(
             chunk_index=chunk_index,
             success=False,
-            error="重试耗尽",
+            error="重试耗尽且降级策略失败",
             elapsed_seconds=elapsed
         )
 
@@ -417,7 +502,7 @@ class NativeAsyncChunkProcessor:
         self._current_max_parallel = max_parallel
         # 动态并发恢复追踪
         self._consecutive_successes = 0
-        self._recovery_threshold = 10  # 连续成功 10 次后恢复并发度
+        self._recovery_threshold = 5  # 🔑 优化：从10降低到5，加快限流缓解后的并发度恢复速度
 
     async def process_single_chunk(
         self,

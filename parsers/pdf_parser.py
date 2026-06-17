@@ -59,7 +59,27 @@ class PdfParser(BaseParser):
             
             # 检测是否为图片型 PDF
             is_image_based = self.is_image_pdf()
-            
+
+            # 🔑 新增：检测PDF加密状态
+            if self.doc.is_encrypted:
+                # 尝试空密码解密（某些PDF加密但密码为空）
+                try:
+                    if self.doc.authenticate(""):
+                        logger.info("   🔓 PDF已解密（空密码）")
+                    else:
+                        # 需要密码，返回提示信息
+                        return ParseResult(
+                            success=False,
+                            error="PDF文件已加密，需要密码才能解密。请提供密码或使用解密工具",
+                            metadata={
+                                "file_path": str(self.file_path),
+                                "needs_password": True,
+                                "page_count": len(self.doc),
+                            },
+                        )
+                except Exception as decrypt_error:
+                    logger.warning(f"   ⚠️ PDF解密检测失败: {decrypt_error}")
+
             # 提取元数据
             metadata = self._extract_metadata()
             
@@ -121,10 +141,64 @@ class PdfParser(BaseParser):
             )
             
         except Exception as e:
+            # 🔑 增强异常分类：区分不同错误类型
+            error_str = str(e)
+            error_type = type(e).__name__
+
+            # 检测加密PDF
+            if "password" in error_str.lower() or "encrypted" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error="PDF文件已加密，需要密码才能解密",
+                    metadata={"file_path": str(self.file_path), "needs_password": True},
+                )
+
+            # 检测文件损坏
+            if "corrupt" in error_str.lower() or "damaged" in error_str.lower() or "invalid" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"PDF文件损坏或格式无效：{error_str}",
+                    metadata={"file_path": str(self.file_path), "is_corrupt": True},
+                )
+
+            # 检测内存不足（大文件）
+            if isinstance(e, MemoryError) or "memory" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error="PDF文件过大，内存不足。建议分批处理或使用更强大的服务器",
+                    metadata={"file_path": str(self.file_path), "file_too_large": True},
+                )
+
+            # 检测文件不存在
+            if isinstance(e, FileNotFoundError) or "not found" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"PDF文件不存在：{self.file_path}",
+                    metadata={"file_path": str(self.file_path)},
+                )
+
+            # 检测权限问题
+            if "permission" in error_str.lower() or "access denied" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"无权限访问PDF文件：{error_str}",
+                    metadata={"file_path": str(self.file_path), "permission_denied": True},
+                )
+
+            # 检测格式不支持
+            if "format" in error_str.lower() or "not a pdf" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"文件格式不支持，可能不是有效的PDF：{error_str}",
+                    metadata={"file_path": str(self.file_path), "invalid_format": True},
+                )
+
+            # 其他未知错误
+            logger.error(f"PDF解析未知错误 [{error_type}]: {error_str}")
             return ParseResult(
                 success=False,
-                error=f"PDF 解析失败：{str(e)}",
-                metadata={"file_path": str(self.file_path)},
+                error=f"PDF解析失败（{error_type}）：{error_str}",
+                metadata={"file_path": str(self.file_path), "error_type": error_type},
             )
         finally:
             if self.doc:

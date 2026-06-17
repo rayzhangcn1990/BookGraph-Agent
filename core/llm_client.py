@@ -277,14 +277,23 @@ class LLMClient:
             config_api_base = self.config.get('api_base', '')
             config_api_key = self.config.get('api_key', '')
             if config_api_base and config_api_key and config_api_key not in ['', 'unused']:
+                # 🔑 增强超时控制：分离连接/读取/写入超时
+                import httpx
+                timeout_config = httpx.Timeout(
+                    connect=30.0,  # 连接超时30秒
+                    read=self.config.get('timeout', 240),  # 读取超时（可配置）
+                    write=30.0,  # 写入超时30秒
+                    pool=30.0   # 连接池超时30秒
+                )
                 self.openai_client = openai.OpenAI(
                     api_key=config_api_key,
                     base_url=config_api_base,
-                    timeout=self.config.get('timeout', 240),
+                    timeout=timeout_config,
                 )
                 self.provider = 'openai'
                 print(f"✅ OpenAI 客户端初始化成功（模型: {self.model}）")
                 print(f"   API Base: {config_api_base}")
+                print(f"   超时配置: 连接={timeout_config.connect}s, 读取={timeout_config.read}s")
                 return
 
         # 后备：使用 Hermes 内置 LLM
@@ -625,12 +634,21 @@ class LLMClient:
 
                     except Exception as e:
                         error_str = str(e)
+                        error_type = type(e).__name__
 
                         # 🔑 反馈给模型池管理器（失败）
                         if self.model_pool_manager:
                             self.model_pool_manager.record_request_result(
                                 current_model, success=False
                             )
+
+                        # 🔑 新增：超时异常处理
+                        if 'timeout' in error_type.lower() or 'timeout' in error_str.lower():
+                            logger.error(f"❌ API调用超时（模型：{current_model}）")
+                            if self.switch_to_next_model(f"超时: {current_model}"):
+                                continue  # 使用下一个模型重试
+                            else:
+                                return None
 
                         # 🔑 检测额度耗尽
                         if self._is_quota_exhausted(error_str):
@@ -672,6 +690,45 @@ class LLMClient:
                             current_model_switches += 1
                             logger.warning(f"⚠️ 模型 {current_model} 调用失败: {error_str[:50]}")
                             if self.switch_to_next_model(f"调用失败"):
+                                continue
+                            else:
+                                break
+
+                        # 🔑 新增：限流智能等待（解析Retry-After）
+                        elif '429' in error_str or 'rate limit' in error_str.lower() or 'throttling' in error_str.lower():
+                            import re
+                            import time
+
+                            # 尝试从错误消息中提取等待时间
+                            wait_seconds = 5  # 默认等待5秒
+
+                            # 策略1: 解析 Retry-After 响应头
+                            retry_after_match = re.search(r'retry.?after[:\s]+(\d+)', error_str, re.IGNORECASE)
+                            if retry_after_match:
+                                wait_seconds = int(retry_after_match.group(1))
+                                logger.info(f"   🕐 解析到Retry-After: {wait_seconds}秒")
+                            else:
+                                # 策略2: 从错误消息中提取秒数
+                                seconds_match = re.search(r'wait[:\s]+(\d+)', error_str, re.IGNORECASE)
+                                if seconds_match:
+                                    wait_seconds = int(seconds_match.group(1))
+                                    logger.info(f"   🕐 从错误消息提取等待时间: {wait_seconds}秒")
+
+                            # 策略3: 指数退避（基于连续限流次数）
+                            if not hasattr(self, '_rate_limit_count'):
+                                self._rate_limit_count = 0
+                            self._rate_limit_count += 1
+                            if self._rate_limit_count > 1:
+                                wait_seconds = min(wait_seconds * (2 ** (self._rate_limit_count - 1)), 300)  # 最多等待5分钟
+                                logger.info(f"   📈 指数退避（第{self._rate_limit_count}次限流）: {wait_seconds}秒")
+
+                            logger.warning(f"   ⏸️  限流等待 {wait_seconds}秒...")
+                            time.sleep(wait_seconds)
+
+                            # 重置限流计数（如果成功等待）
+                            self._rate_limit_count = 0
+
+                            if self.switch_to_next_model(f"限流"):
                                 continue
                             else:
                                 break
@@ -945,6 +1002,47 @@ class LLMClient:
             Dict: 规范化后的数据
         """
         # ═══════════════════════════════════════════════════════════
+        # 🔑 Step 0: 占位符检测与清理
+        # ═══════════════════════════════════════════════════════════
+
+        PLACEHOLDER_PATTERNS = [
+            "待补充", "待分析", "待填写", "待完善", "待完成",
+            "TBD", "TODO", "FIXME", "N/A", "暂无",
+            "需要补充", "需要分析", "略", "无",
+            "（待补充）", "（待分析）", "（略）"
+        ]
+
+        def is_placeholder(text: str) -> bool:
+            """检测文本是否为占位符"""
+            if not isinstance(text, str):
+                return False
+            text_stripped = text.strip()
+            # 精确匹配占位符模式
+            for pattern in PLACEHOLDER_PATTERNS:
+                if text_stripped == pattern or text_stripped == f"（{pattern}）":
+                    return True
+            # 检测以占位符开头的文本
+            for pattern in PLACEHOLDER_PATTERNS:
+                if text_stripped.startswith(pattern) and len(text_stripped) < len(pattern) + 10:
+                    return True
+            return False
+
+        def clean_placeholder(obj):
+            """递归清理占位符（替换为空字符串或空数组）"""
+            if isinstance(obj, dict):
+                return {k: clean_placeholder(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                # 过滤掉纯占位符元素
+                return [clean_placeholder(item) for item in obj if not is_placeholder(item)]
+            elif isinstance(obj, str):
+                return "" if is_placeholder(obj) else obj
+            else:
+                return obj
+
+        # 清理占位符
+        data = clean_placeholder(data)
+
+        # ═══════════════════════════════════════════════════════════
         # 🔑 Step 1: 确保顶层结构存在
         # ═══════════════════════════════════════════════════════════
 
@@ -1167,29 +1265,75 @@ class LLMClient:
             return book_graph
             
         except (json.JSONDecodeError, ValidationError) as e:
-            print(f"⚠️ BookGraph 合成失败：{e}")
-            # 返回一个基础的 BookGraph
+            logger.warning(f"⚠️ BookGraph 合成失败：{e}")
+
+            # 🔑 新增：部分构造策略 - 保留有效数据而非返回空BookGraph
             from schemas.book_graph_schema import (
                 BookMetadata, TimeBackground, CriticalAnalysis
             )
-            
-            return BookGraph(
-                metadata=BookMetadata(
+
+            # 尝试提取并构造metadata
+            try:
+                meta_data = data.get('metadata', {}) if 'data' in locals() else {}
+                metadata_obj = BookMetadata(
+                    title=meta_data.get('title', metadata.get('title', 'Unknown')),
+                    author=meta_data.get('author', metadata.get('author', 'Unknown')),
+                    author_intro=meta_data.get('author_intro', metadata.get('author_intro', '')),
+                    discipline=meta_data.get('discipline', metadata.get('discipline', DisciplineType.哲学)),
+                )
+            except Exception as meta_error:
+                logger.warning(f"   ⚠️ metadata构造失败: {meta_error}")
+                metadata_obj = BookMetadata(
                     title=metadata.get('title', 'Unknown'),
                     author=metadata.get('author', 'Unknown'),
                     author_intro=metadata.get('author_intro', ''),
                     discipline=metadata.get('discipline', DisciplineType.哲学),
-                ),
-                time_background=TimeBackground(
+                )
+
+            # 尝试提取并构造time_background
+            try:
+                tb_data = data.get('time_background', {}) if 'data' in locals() else {}
+                time_background_obj = TimeBackground(
+                    macro_background=tb_data.get('macro_background', ''),
+                    micro_background=tb_data.get('micro_background', ''),
+                    core_contradiction=tb_data.get('core_contradiction', ''),
+                )
+            except Exception as tb_error:
+                logger.warning(f"   ⚠️ time_background构造失败: {tb_error}")
+                time_background_obj = TimeBackground(
                     macro_background="",
                     micro_background="",
                     core_contradiction="",
-                ),
-                critical_analysis=CriticalAnalysis(
+                )
+
+            # 尝试提取并构造critical_analysis
+            try:
+                ca_data = data.get('critical_analysis', {}) if 'data' in locals() else {}
+                critical_analysis_obj = CriticalAnalysis(
+                    feminist_perspective=ca_data.get('feminist_perspective', ''),
+                    postcolonial_perspective=ca_data.get('postcolonial_perspective', ''),
+                    ethical_boundaries=ca_data.get('ethical_boundaries', {}),
+                    core_doubts=ca_data.get('core_doubts', []),
+                )
+            except Exception as ca_error:
+                logger.warning(f"   ⚠️ critical_analysis构造失败: {ca_error}")
+                critical_analysis_obj = CriticalAnalysis(
                     feminist_perspective="",
                     postcolonial_perspective="",
                     ethical_boundaries={},
-                ),
+                )
+
+            # 🔑 关键：保留所有数组数据（即使不完整）
+            logger.info("   📦 部分构造BookGraph，保留有效数据")
+            return BookGraph(
+                metadata=metadata_obj,
+                time_background=time_background_obj,
+                critical_analysis=critical_analysis_obj,
+                chapters=data.get('chapters', []) if 'data' in locals() else [],
+                core_concepts=data.get('core_concepts', []) if 'data' in locals() else [],
+                key_insights=data.get('key_insights', []) if 'data' in locals() else [],
+                key_cases=data.get('key_cases', []) if 'data' in locals() else [],
+                key_quotes=data.get('key_quotes', []) if 'data' in locals() else [],
             )
 
     def detect_discipline(

@@ -73,10 +73,48 @@ class EpubParser(BaseParser):
             )
             
         except Exception as e:
+            # 🔑 增强异常分类：区分不同错误类型
+            error_str = str(e)
+            error_type = type(e).__name__
+
+            # 检测文件损坏（ZIP格式损坏）
+            if "badzipfile" in error_type.lower() or "zip" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"EPUB文件损坏（ZIP格式无效）：{error_str}",
+                    metadata={"file_path": str(self.file_path), "is_corrupt": True},
+                )
+
+            # 检测XML损坏（OPF/NCX解析失败）
+            if "xml" in error_str.lower() or "parse" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"EPUB内部XML文件损坏：{error_str}",
+                    metadata={"file_path": str(self.file_path), "xml_corrupt": True},
+                )
+
+            # 检测文件不存在
+            if isinstance(e, FileNotFoundError):
+                return ParseResult(
+                    success=False,
+                    error=f"EPUB文件不存在：{self.file_path}",
+                    metadata={"file_path": str(self.file_path)},
+                )
+
+            # 检测权限问题
+            if "permission" in error_str.lower():
+                return ParseResult(
+                    success=False,
+                    error=f"无权限访问EPUB文件：{error_str}",
+                    metadata={"file_path": str(self.file_path), "permission_denied": True},
+                )
+
+            # 其他未知错误
+            logger.error(f"EPUB解析未知错误 [{error_type}]: {error_str}")
             return ParseResult(
                 success=False,
-                error=f"EPUB 解析失败：{str(e)}",
-                metadata={"file_path": str(self.file_path)},
+                error=f"EPUB解析失败（{error_type}）：{error_str}",
+                metadata={"file_path": str(self.file_path), "error_type": error_type},
             )
 
     def _extract_metadata(self) -> Dict:
@@ -217,18 +255,28 @@ class EpubParser(BaseParser):
             # 提取文本内容
             text_content = self._extract_text_content(soup)
 
-            # 跳过空章节或过短章节
-            if len(text_content) < 100:
-                return None
+            # 🔑 修复：不再直接丢弃短内容，而是标记并保留
+            # 短内容可能是扉页、版权页、目录等，也有分析价值
+            is_short = len(text_content) < 100
 
             return {
                 "title": title,
                 "content": text_content,
-                "chapter_number": chapter_number
+                "chapter_number": chapter_number,
+                "is_short": is_short,  # 🔑 标记短章节，供后续处理参考
+                "word_count": len(text_content),  # 🔑 添加字数统计
             }
         except Exception as e:
             logger.warning(f"解析章节 {chapter_number} 失败: {e}")
-            return None
+            # 🔑 修复：返回占位章节而非完全丢弃，标记解析失败
+            return {
+                "title": f"第{chapter_number}章(解析失败)",
+                "content": "",
+                "chapter_number": chapter_number,
+                "is_short": True,
+                "word_count": 0,
+                "parse_error": str(e),  # 🔑 记录解析错误
+            }
 
     def _extract_chapter_title(self, soup: BeautifulSoup) -> str:
         """提取章节标题"""
@@ -242,13 +290,32 @@ class EpubParser(BaseParser):
         return ""
 
     def _extract_text_content(self, soup: BeautifulSoup) -> str:
-        """提取文本内容"""
+        """提取文本内容（增强编码兼容性）"""
         # 移除 script 和 style 标签
         for tag in soup(['script', 'style', 'nav', 'header', 'footer']):
             tag.decompose()
 
         # 提取文本
         text = soup.get_text(separator='\n', strip=True)
+
+        # 🔑 编码修复：检测并处理常见编码问题
+        try:
+            # 尝试UTF-8解码（大多数EPUB）
+            text.encode('utf-8').decode('utf-8')
+        except UnicodeDecodeError:
+            # 尝试常见中文编码
+            for encoding in ['gbk', 'gb2312', 'big5', 'utf-16']:
+                try:
+                    text = text.encode('latin1').decode(encoding)
+                    logger.info(f"   🔧 编码转换: {encoding} → UTF-8")
+                    break
+                except (UnicodeDecodeError, UnicodeEncodeError):
+                    continue
+            else:
+                # 所有编码尝试失败，使用replace模式强制UTF-8
+                text = text.encode('utf-8', errors='replace').decode('utf-8', errors='replace')
+                logger.warning("   ⚠️ 编码修复失败，使用replace模式")
+
         return text
 
     def _process_document(self, doc_item, chapter_id: int) -> Optional[Dict]:
