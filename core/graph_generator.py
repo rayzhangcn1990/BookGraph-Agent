@@ -140,16 +140,16 @@ class GraphGenerator:
 
     def _validate_chapters(self, chapters: List) -> List:
         """
-        校验并过滤无效章节
+        校验并过滤无效章节，并规范化章节编号
 
         Args:
             chapters: 章节列表
 
         Returns:
-            List: 过滤后的有效章节列表
+            List: 过滤后的有效章节列表（章节编号已规范化）
         """
         valid_chapters = []
-        for chapter in chapters:
+        for idx, chapter in enumerate(chapters):
             if self._is_valid_chapter_title(chapter.title):
                 # 同时校验核心论点是否是模板化内容
                 core_arg_cleaned = self._clean_placeholder(chapter.core_argument)
@@ -158,6 +158,17 @@ class GraphGenerator:
                 # 如果核心论点和底层逻辑都被过滤，说明是模板化章节，跳过
                 if not core_arg_cleaned and not logic_cleaned:
                     continue
+
+                # 🔑 修复：规范化章节编号（统一为两位数字格式）
+                # 提取数字部分
+                import re
+                num_match = re.search(r'\d+', str(chapter.chapter_number))
+                if num_match:
+                    num = int(num_match.group())
+                    chapter.chapter_number = f"{num:02d}"  # 格式化为两位数字
+                else:
+                    # 如果无法提取数字，使用索引+1
+                    chapter.chapter_number = f"{idx + 1:02d}"
 
                 valid_chapters.append(chapter)
 
@@ -198,7 +209,12 @@ class GraphGenerator:
         
         lines.append("related_books:")
         for book in book_graph.metadata.related_books:
-            lines.append(f'  - "[[{book}]]"')
+            # 🔑 修复：处理 related_books 可能是字典的情况
+            if isinstance(book, dict):
+                book_title = book.get('book_name') or book.get('title') or str(book)
+                lines.append(f'  - "[[{book_title}]]"')
+            else:
+                lines.append(f'  - "[[{book}]]"')
         
         lines.append(f"created: {today}")
         lines.append("type: book-graph")
@@ -267,7 +283,16 @@ class GraphGenerator:
             lines.append("|------|------|----------|----------|----------|")
 
             for chapter in valid_chapters:
-                related = ", ".join([f"[[{b}]]" for b in chapter.related_books[:3]]) if chapter.related_books else "-"
+                # 🔑 修复：处理 related_books 可能是字典的情况
+                related_books_formatted = []
+                for b in (chapter.related_books or [])[:3]:
+                    if isinstance(b, dict):
+                        # 提取 book_name 或 title 字段
+                        book_title = b.get('book_name') or b.get('title') or str(b)
+                        related_books_formatted.append(f"[[{book_title}]]")
+                    else:
+                        related_books_formatted.append(f"[[{b}]]")
+                related = ", ".join(related_books_formatted) if related_books_formatted else "-"
                 # 核心论点和底层逻辑保持完整，不截断，替换特殊字符避免破坏表格
                 core_arg = self._clean_placeholder(chapter.core_argument, "-")
                 core_arg = core_arg.replace("|", "｜").replace("\n", " ").strip()
@@ -348,8 +373,16 @@ class GraphGenerator:
                 lines.append(f"> {concept.critical_review}")
                 lines.append("")
             
+            # 🔑 修复：处理 related_books 可能是字典的情况
             if concept.related_books:
-                lines.append(f"**关联书籍**：{', '.join([f'[[{b}]]' for b in concept.related_books])}")
+                related_books_formatted = []
+                for b in concept.related_books:
+                    if isinstance(b, dict):
+                        book_title = b.get('book_name') or b.get('title') or str(b)
+                        related_books_formatted.append(f"[[{book_title}]]")
+                    else:
+                        related_books_formatted.append(f"[[{b}]]")
+                lines.append(f"**关联书籍**：{', '.join(related_books_formatted)}")
                 lines.append("")
         
         # ═══════════════════════════════════════════════════
@@ -465,8 +498,16 @@ class GraphGenerator:
             lines.append(f"| 完整语境 | {quote.core_theme} |")
             if quote.common_misreading:
                 lines.append(f"| 常见误读 | {quote.common_misreading} |")
+            # 🔑 修复：处理 related_books 可能是字典的情况
             if quote.related_books:
-                lines.append(f"| 关联笔记 | {', '.join([f'[[{b}]]' for b in quote.related_books])} |")
+                related_books_formatted = []
+                for b in quote.related_books:
+                    if isinstance(b, dict):
+                        book_title = b.get('book_name') or b.get('title') or str(b)
+                        related_books_formatted.append(f"[[{book_title}]]")
+                    else:
+                        related_books_formatted.append(f"[[{b}]]")
+                lines.append(f"| 关联笔记 | {', '.join(related_books_formatted)} |")
             lines.append("")
             lines.append("---")
             lines.append("")

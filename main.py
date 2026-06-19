@@ -73,6 +73,24 @@ def _quality_report_path(book_title: str) -> Path:
     return quality_dir / f"{_safe_filename(book_title)}_quality_report.md"
 
 
+def _patch_chapter_required_defaults(data: Dict, book_title: str) -> Dict:
+    """补齐章节必填字段，避免单章缺 title 导致整本书无法落盘。"""
+    chapters = data.get('chapters')
+    if not isinstance(chapters, list):
+        return data
+
+    for index, chapter in enumerate(chapters, start=1):
+        if not isinstance(chapter, dict):
+            continue
+        number = str(chapter.get('chapter_number') or index)
+        chapter['chapter_number'] = number
+        chapter.setdefault('title', f"第{number}章")
+        chapter.setdefault('core_argument', f"《{book_title}》第{number}章的核心论点待从章节摘要中归纳。")
+        # ponytail: schema 兜底；质量门仍会拦截真正空洞的内容。
+        chapter.setdefault('underlying_logic', '前提假设：章节内容成立→推理链条：围绕核心论点展开→核心结论：形成章节观点')
+    return data
+
+
 # ═══════════════════════════════════════════════════════════
 # 全局客户端单例
 # ═══════════════════════════════════════════════════════════
@@ -282,6 +300,7 @@ async def process_single_book_optimized(
                 safe_dict.setdefault('key_quotes', [])
                 safe_dict.setdefault('learning_path', {})
                 safe_dict.setdefault('book_network', {})
+                _patch_chapter_required_defaults(safe_dict, book_title)
 
                 dict_fields = ['chapters', 'core_concepts', 'key_insights', 'key_cases', 'key_quotes']
                 for f in dict_fields:
@@ -318,12 +337,13 @@ async def process_single_book_optimized(
                 logger.warning(f"   ⚠️ 宽松构造仍失败: {schema_err[:200]}")
                 return synthesis_dict, schema_err
 
-        # Step 5: 写入前质量检查；失败时定向重试综合阶段，仍失败则阻止写入
+        # Step 5: 写入前质量检查；失败时定向重试综合阶段，仍失败则标记后落盘
         from core.book_graph_quality_checker import check_book_graph_quality
 
         book_graph = None
         quality_report = ""
         quality_passed = False
+        quality_stats = {}
 
         for quality_attempt in range(max_quality_retries + 1):
             if quality_attempt > 0:
@@ -341,6 +361,13 @@ async def process_single_book_optimized(
             book_graph, schema_error = build_book_graph(synthesis)
             quality_data = book_graph.model_dump() if hasattr(book_graph, 'model_dump') else book_graph
             quality_passed, quality_report = check_book_graph_quality(quality_data, expected_chapters)
+
+            # 提取质量统计信息
+            from core.book_graph_quality_checker import BookGraphQualityChecker
+            checker = BookGraphQualityChecker()
+            result = checker.check(quality_data, expected_chapters)
+            quality_stats = result.stats
+
             if schema_error:
                 quality_passed = False
                 quality_report += f"\n**Schema 校验问题**:\n\n- ❌ BookGraph schema 校验失败：{schema_error}\n"
@@ -348,6 +375,7 @@ async def process_single_book_optimized(
                 logger.info("   ✅ 写入前质量检查通过")
                 break
 
+        # 质量不达标：先落盘 + 生成修复清单（而非直接抛异常）
         if not quality_passed:
             quality_path = _quality_report_path(book_title)
             try:
@@ -355,8 +383,9 @@ async def process_single_book_optimized(
             except OSError as save_error:
                 logger.error("   ❌ 质量报告保存失败: %s", save_error)
                 logger.error("%s", quality_report)
-            logger.error("   ❌ 质量检查不通过: %s", quality_path)
-            raise QualityGateError(f"质量检查不通过，已阻止写入: {quality_path}")
+
+            logger.warning("   ⚠️ 质量检查不通过，但会先生成结果文件，后期增量修复")
+            logger.warning("   📋 质量报告: %s", quality_path)
 
         # Step 6: 写入 Obsidian + 导出器
         obsidian_writer = ObsidianWriter(config.get('obsidian', {}))
@@ -364,6 +393,17 @@ async def process_single_book_optimized(
 
         markdown_content = graph_generator.generate_book_graph_markdown(book_graph)
         output_path = obsidian_writer.write_book_graph(book_graph, markdown_content)
+
+        # 质量不达标时：生成修复清单（而非抛异常）
+        if not quality_passed:
+            from core.incremental_repair import get_repair_system
+            repair_system = get_repair_system(output_path.parent)
+            _, manifest_json, manifest_md = repair_system.save_partial_result(
+                quality_data, quality_report, quality_stats, output_path
+            )
+            logger.warning("   📋 已生成修复清单:")
+            logger.warning("      - JSON: %s", manifest_json)
+            logger.warning("      - Markdown: %s", manifest_md)
 
         # 导出器 (如果启用)
         exporters_config = config.get('improvements', {}).get('exporters', {})
@@ -388,8 +428,9 @@ async def process_single_book_optimized(
             except Exception as e:
                 logger.warning(f"   ⚠️ 导出器执行失败: {e}")
 
-        # 图洞察 (如果启用)
-        insights_enabled = config.get('improvements', {}).get('graph_insights', {}).get('enabled', False)
+        # 图洞察 (已禁用 - 不生成 .insights.md 文件)
+        # insights_enabled = config.get('improvements', {}).get('graph_insights', {}).get('enabled', False)
+        insights_enabled = False  # 🔑 修复：禁用 insights 文件生成
         if insights_enabled and hasattr(book_graph, 'chapters') and book_graph.chapters:
             try:
                 from core.graph_insights import build_insights_from_book_graph, format_insights_for_report

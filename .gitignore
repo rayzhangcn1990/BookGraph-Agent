@@ -134,3 +134,9 @@ output/
 temp/
 # Added by code-review-graph
 .code-review-graph/
+
+# OMC sessions
+.omc/state/sessions/
+
+# Worktrees
+.claude/worktrees/

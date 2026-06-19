@@ -201,6 +201,27 @@ class BookGraphQualityChecker:
         stats['chapter_count'] = chapter_count
         stats['expected_chapters'] = expected_chapters
 
+        # 🔑 新增：related_books 格式检查（检测字典格式）
+        invalid_related_books = self._check_related_books_format(book_graph_data)
+        stats['invalid_related_books'] = invalid_related_books
+
+        if invalid_related_books:
+            issues.append(f"⛔ related_books格式错误：发现 {len(invalid_related_books)} 处字典格式（应提取title/book_name字段）")
+
+        # 🔑 新增：章节编号规范性检查
+        invalid_chapter_numbers = self._check_chapter_number_format(chapters)
+        stats['invalid_chapter_numbers'] = invalid_chapter_numbers
+
+        if invalid_chapter_numbers:
+            warnings.append(f"章节编号不规范：{len(invalid_chapter_numbers)} 处（应统一为两位数字格式）")
+
+        # 🔑 新增：underlying_logic 缺失检查
+        missing_logic_chapters = self._check_underlying_logic_missing(chapters)
+        stats['missing_logic_chapters'] = missing_logic_chapters
+
+        if missing_logic_chapters:
+            warnings.append(f"底层逻辑缺失：{len(missing_logic_chapters)} 处（章节应包含underlying_logic字段）")
+
         # 🔑 新增：章节合并检测（严厉检测LLM偷懒行为）
         merged_chapters = self._detect_merged_chapters(chapters)
         stats['merged_chapters'] = merged_chapters
@@ -564,6 +585,98 @@ class BookGraphQualityChecker:
                     missing.append(str(missing_num))
 
         # 只报告前10个缺失（避免报告过长）
+        return missing[:10]
+
+    def _check_related_books_format(self, book_graph_data: Dict) -> List[Dict]:
+        """
+        🔑 新增：检查 related_books 是否包含字典格式
+
+        Args:
+            book_graph_data: BookGraph 数据
+
+        Returns:
+            List[Dict]: 格式错误的 related_books 列表
+        """
+        invalid = []
+
+        def check_list(books, path):
+            if not books:
+                return
+            for b in books:
+                if isinstance(b, dict):
+                    invalid.append({
+                        'path': path,
+                        'value': str(b)[:100]
+                    })
+
+        # 检查 metadata.related_books
+        check_list(
+            book_graph_data.get('metadata', {}).get('related_books', []),
+            'metadata.related_books'
+        )
+
+        # 检查 chapters
+        for idx, ch in enumerate(book_graph_data.get('chapters', [])):
+            check_list(
+                ch.get('related_books', []),
+                f'chapters[{idx}].related_books'
+            )
+
+        # 检查其他字段
+        for field in ['core_concepts', 'key_insights', 'key_cases', 'key_quotes']:
+            for idx, item in enumerate(book_graph_data.get(field, [])):
+                check_list(
+                    item.get('related_books', []),
+                    f'{field}[{idx}].related_books'
+                )
+
+        return invalid[:10]  # 只返回前10个
+
+    def _check_chapter_number_format(self, chapters: List[Dict]) -> List[Dict]:
+        """
+        🔑 新增：检查章节编号是否为规范的两位数字格式
+
+        Args:
+            chapters: 章节列表
+
+        Returns:
+            List[Dict]: 不规范的章节编号列表
+        """
+        invalid = []
+
+        for idx, ch in enumerate(chapters):
+            ch_num = str(ch.get('chapter_number', ''))
+            # 检查是否为两位数字格式
+            if not re.match(r'^\d{2}$', ch_num):
+                invalid.append({
+                    'index': idx,
+                    'chapter_number': ch_num,
+                    'expected': f"{idx + 1:02d}"
+                })
+
+        return invalid[:10]
+
+    def _check_underlying_logic_missing(self, chapters: List[Dict]) -> List[Dict]:
+        """
+        🔑 新增：检查底层逻辑是否缺失
+
+        Args:
+            chapters: 章节列表
+
+        Returns:
+            List[Dict]: 缺失底层逻辑的章节列表
+        """
+        missing = []
+
+        for idx, ch in enumerate(chapters):
+            logic = ch.get('underlying_logic', '')
+            if not logic or logic == '-' or logic.strip() == '':
+                missing.append({
+                    'index': idx,
+                    'chapter_number': ch.get('chapter_number', ''),
+                    'title': ch.get('title', '')[:30]
+                })
+
         return missing[:10]
 
     def _check_required_fields(self, data: Dict, required: List[str]) -> List[str]:

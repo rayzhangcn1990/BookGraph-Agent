@@ -96,6 +96,8 @@ improvements:
     threshold: 80.0              # 质量分数阈值（低于80分自动回退）
     auto_retry: true             # 自动重试机制（发现质量问题立即重试）
     max_retries: 3               # 自动重试次数
+    lazy_write: true             # 🔑 新增：质量不达标时仍落盘，生成修复清单
+    generate_repair_manifest: true  # 🔑 新增：自动生成修复清单（JSON + Markdown）
 
   # 全局并发池配置 (P0优化)
   global_concurrency:
