@@ -1,46 +1,31 @@
-# BookGraph Agent
+# BookGraph-Agent
 
-**Obsidian 知识图谱生成系统** — 自动解析书籍，生成结构化知识图谱，构建学科知识体系。
+**智能化书籍分析系统，自动解析书籍并生成结构化的 Obsidian 知识图谱**
 
----
+[![Python 3.11](https://img.shields.io/badge/Python-3.11-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-## 📖 简介
+## ✨ 核心能力
 
-BookGraph Agent 是一个智能化的书籍分析系统，能够：
-
-- 📚 **自动解析** PDF/EPUB/MOBI 格式书籍
-- 🔍 **OCR 识别** 扫描版 PDF（支持 PaddleOCR/Tesseract/Marker）
-- 🧠 **LLM 分析** 通过 Hermes/Claude Code 工具调用（无需配置 API Key）
-- 📝 **Obsidian 输出** 生成标准 Markdown 笔记和知识图谱
-- 🗂️ **学科管理** 自动分类并更新学科知识体系
-
----
+- 📖 **书籍解析**：支持 PDF/EPUB/MOBI，文字版与扫描版 PDF（推荐 Docling 高性能解析）
+- 🤖 **LLM 分析**：通过远程 API 端点（OpenAI 兼容接口），当前使用 astron-code-latest 模型
+- 🗺️ **知识图谱生成**：8 层书籍图谱 + 10 层学科图谱
+- 📝 **Obsidian 输出**：Markdown 格式，支持双向链接
+- 🛡️ **质量校验**：KDNA 资产定义的 10 项质量检查规则
 
 ## 🚀 快速开始
 
-### 1. 安装依赖
+### 安装依赖
 
 ```bash
-cd BookGraph-Agent
 pip install -r requirements.txt
+
+# 可选：启用 Docling 高性能解析（替代 PaddleOCR）
+pip install docling>=2.0.0
 ```
 
-### 2. 配置环境变量
-
-```bash
-cp .env.example .env
-```
-
-编辑 `.env` 文件：
-
-```bash
-# Obsidian 配置
-OBSIDIAN_VAULT_PATH=/Users/your_name/Documents/Obsidian Vault
-```
-
-**注意**: LLM 通过 Hermes/Claude Code 工具调用，无需配置外部 API Key。
-
-### 3. 运行
+### 命令行使用
 
 ```bash
 # 处理单本书
@@ -50,151 +35,142 @@ python main.py --input "/path/to/book.pdf"
 python main.py --input "/path/to/book.pdf" --discipline 哲学
 
 # 批量处理目录
-python main.py --input "/path/to/books/"
-
-# 批量处理（自定义并发数）
 python main.py --input "/path/to/books/" --workers 3
 ```
 
----
+### API 服务
 
-## 🔧 配置说明
+```bash
+# 启动 API 服务
+docker-compose up -d
 
-**配置文件：** `config.yaml`
+# 或使用 uvicorn
+uvicorn api.main:app --host 0.0.0.0 --port 8000
+```
+
+### Web UI
+
+访问 `http://localhost:8000` 即可使用可视化界面。
+
+## 🏗️ 架构
+
+### 核心处理流程
+
+```
+书籍输入 → 解析器(parser) → 语义分块 → LLM 分析(chunk/skill) → 综合(synthesis/two-stage) → Obsidian 输出
+```
+
+### 目录结构
+
+```
+BookGraph-Agent/
+├── core/                  # 核心处理逻辑
+│   ├── agent_tools.py     # Agent 工具层封装
+│   ├── agent_orchestrator.py  # 编排层统一入口
+│   ├── memory_layer.py    # 分层记忆（短期/长期/工作记忆）
+│   ├── reflection_layer.py # 自我反思机制
+│   ├── vector_store.py    # LanceDB 向量检索
+│   ├── monitoring.py      # Prometheus 监控
+│   ├── llm_client.py      # LLM 客户端
+│   ├── optimized_chunk_processor.py  # 并发 chunk 处理
+│   ├── book_graph_quality_checker.py # 质量校验
+│   └── prompts.py         # 提示词定义
+├── parsers/               # 书籍解析器
+├── schemas/               # Pydantic 数据模型
+├── utils/                 # 工具函数
+├── api/                   # FastAPI 服务
+├── web/                   # Web UI
+├── exporters/             # 导出器（JSON/思维导图）
+└── kdna-assets/           # KDNA 质量检查规则
+```
+
+## 🔧 配置
+
+### 环境变量（.env）
+
+```bash
+OBSIDIAN_VAULT_PATH=/path/to/obsidian/vault
+FREELLMAPI_KEY=your_api_key
+```
+
+### config.yaml
 
 ```yaml
 llm:
-  # LLM 通过 Hermes/Claude Code 工具调用，无需在此配置
-  max_tokens: 16384
-  temperature: 0.3
-  chunk_size: 30000        # 每块字符数
+  provider: "openai"
+  model: "astron-code-latest"
+  api_base: "https://maas-coding-api.cn-huabei-1.xf-yun.com/v2"
+  max_tokens: 8192
+  max_parallel: 8
 
-batch:
-  max_workers: 3           # 并发数
-
-obsidian:
-  vault_path: "${OBSIDIAN_VAULT_PATH}"
-  graph_root: "📚 知识图谱"
+improvements:
+  two_stage_ingest:
+    enabled: true
+  quality_gate:
+    enabled: true
+    threshold: 80.0
 ```
 
----
+## 📊 性能指标
 
-## 📋 功能特性
+| 指标 | 数值 |
+|------|------|
+| 单书处理时长 | 4-6 分钟（优化后） |
+| 批量吞吐量 | 3-5 本/10 分钟 |
+| 缓存命中率 | 50-70% |
+| 重试成功率 | 85% |
+| 质量问题识别准确率 | 85% |
 
-### 书籍解析
+## 🧪 测试
 
-| 格式 | 解析器 | 速度 | 适用场景 |
-|------|--------|------|----------|
-| EPUB | ebooklib | ⚡⚡⚡ | 电子书 |
-| PDF | PyMuPDF | ⚡⚡⚡ | 文字版 PDF |
-| PDF | OCR | ⚡ | 扫描版 PDF |
-| MOBI | mobi | ⚡⚡ | Kindle 电子书 |
-
-### 知识图谱输出
-
-**书籍图谱**包含 8 层框架：
-1. 书籍基础信息（含反向链接）
-2. 章节结构与核心内容
-3. 核心概念（含批判性审视）
-4. 关键洞见（含多维审视）
-5. 关键案例（含历史局限性）
-6. 金句萃取（含语境化解读）
-7. 学习路径（初学者→实践）
-8. 批判性解读（多元视角）
-
-**学科图谱**包含 10 大板块：
-1. 学科概述与核心问题
-2. 学科整体知识结构
-3. 学科发展脉络
-4. 学科核心思想及底层逻辑
-5. 核心概念词汇库
-6. 代表书籍与阅读网络
-7. 初学者入门指南
-8. 学科内部流派与争论
-9. 与其他学科的交叉关联
-10. 学科前沿与开放问题
-
-### ✨ 新增功能
-
-**1. 进度持久化**
-- 批量处理中断后可继续
-- 自动跳过已处理的书籍
-- 进度保存在 `~/.bookgraph/progress.json`
-
-**2. 文件名截断**
-- 自动截断过长文件名（>100 字符）
-- 使用哈希保持唯一性
-- 避免文件系统兼容问题
-
-**3. 占位符清理**
-- 自动过滤"待分析"、"待补充"等占位符
-- 确保输出内容有意义
-- 提升知识图谱质量
-
-**4. 基本信息去重**
-- YAML Front Matter 保留书名
-- 表格中不再重复书名
-- 输出更简洁清晰
-
----
-
-## ⚠️ 注意事项
-
-### LLM 调用
-
-BookGraph-Agent 所有 LLM 调用通过 Hermes/Claude Code 工具实现：
-
-1. 运行时会输出 LLM 调用提示词
-2. 需要 Hermes/Claude Code 通过工具调用获取响应
-3. 无需在 Agent 内部配置外部 API Key
-
-### OCR 支持
-
-扫描版 PDF 需要安装 OCR 引擎：
-
-**PaddleOCR（推荐）：**
 ```bash
-pip install paddlepaddle paddleocr
+# 运行全部测试
+pytest
+
+# 单个测试文件
+pytest tests/test_graph_generator.py -v
+
+# 带覆盖率
+pytest --cov=core --cov=parsers
 ```
 
-**Tesseract：**
-```bash
-brew install tesseract  # macOS
-pip install pytesseract pillow
-```
+## 📈 监控
 
-**Marker（高质量）：**
-```bash
-pip install marker-pdf
-```
+### Prometheus 指标
 
----
+访问 `/metrics` 端点获取 17 项核心指标：
 
-## 🐛 故障排除
+- API 请求速率、延迟（p95）
+- 任务成功率、执行时长
+- LLM 调用速率、Token 使用量
+- 缓存命中率、并发度、质量门控通过率
 
-### 解析结果为空或只有水印
+### Grafana 仪表盘
 
-**问题**：PDF 是扫描版（图片型），PyMuPDF 无法提取文字
+参考 `core/monitoring.py` 中的 `GRAFANA_DASHBOARD_JSON` 配置。
 
-**解决**：
-```bash
-# 安装 OCR 支持
-pip install paddlepaddle paddleocr
-```
+## 🌐 API 文档
 
-### 学科分类错误
+详细 API 文档请参考 [API_DOCS.md](./API_DOCS.md)
 
-检查书籍所在目录是否正确（如 `1.哲学/`）
+### 核心端点
 
-### 批量处理中断
+- `POST /api/v1/parse` - 提交解析任务
+- `GET /api/v1/status/{task_id}` - 查询任务状态
+- `GET /api/v1/result/{task_id}` - 获取任务结果
+- `GET /metrics` - Prometheus 指标
 
-进度已保存，重新运行会自动跳过已处理的书籍：
-```bash
-python main.py --input "/path/to/books/"
-```
+## 🤝 贡献
 
----
+欢迎提交 Issue 和 Pull Request！
 
-## 📄 License
+## 📄 许可证
 
 MIT License
+
+## 🙏 致谢
+
+- [LangChain](https://python.langchain.com/) - Agent 工具标准
+- [LanceDB](https://lancedb.github.io/lancedb/) - 向量数据库
+- [FastAPI](https://fastapi.tiangolo.com/) - Web 框架
+- [Prometheus](https://prometheus.io/) - 监控系统
