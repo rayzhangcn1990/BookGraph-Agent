@@ -26,7 +26,7 @@ try:
     from sentence_transformers import SentenceTransformer
     from sklearn.metrics.pairwise import cosine_similarity
     SEMANTIC_DETECTION_AVAILABLE = True
-except ImportError:
+except (ImportError, NameError):
     SEMANTIC_DETECTION_AVAILABLE = False
 
 # ponytail: 尝试导入KDNA集成模块（可选）
@@ -37,6 +37,50 @@ except ImportError:
     KDNA_INTEGRATION_AVAILABLE = False
 
 logger = logging.getLogger("BookGraph-Agent")
+
+
+def quick_validate_chunk_result(result: Dict) -> Tuple[bool, float]:
+    """快速验证 chunk 分析结果质量（用于降级策略）
+
+    Args:
+        result: chunk 分析结果字典
+
+    Returns:
+        Tuple[bool, float]: (是否通过, 质量分数 0-1)
+    """
+    if not isinstance(result, dict):
+        return False, 0.0
+
+    score = 0.0
+    max_score = 5.0
+
+    # 检查 1: 包含核心字段
+    if 'chapter_summaries' in result or 'chapters' in result:
+        score += 1.0
+    if 'core_concepts' in result:
+        score += 1.0
+
+    # 检查 2: 字段有实质内容
+    chapter_summaries = result.get('chapter_summaries', result.get('chapters', []))
+    if isinstance(chapter_summaries, list) and len(chapter_summaries) > 0:
+        # 检查是否有占位符
+        summaries_text = ' '.join(str(s) for s in chapter_summaries)
+        if not re.search(r'TBD|TODO|N/A|待分析|待补充', summaries_text, re.IGNORECASE):
+            score += 1.0
+
+    core_concepts = result.get('core_concepts', [])
+    if isinstance(core_concepts, list) and len(core_concepts) >= 2:
+        score += 1.0
+
+    # 检查 3: 无占位符污染
+    result_str = str(result)
+    if not re.search(r'TBD|TODO|N/A|待分析|待补充', result_str, re.IGNORECASE):
+        score += 1.0
+
+    quality_score = score / max_score
+    is_valid = quality_score >= 0.6  # 60% 以上通过
+
+    return is_valid, quality_score
 
 
 @dataclass

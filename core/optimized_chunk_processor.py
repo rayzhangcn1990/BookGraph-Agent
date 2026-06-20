@@ -95,34 +95,45 @@ class OptimizedChunkProcessor:
         book_title: str,
         system_prompt: str,
         chunk_prompt_template: str,
-        use_cache: bool = True
+        use_cache: bool = True,
+        local_hints_by_chunk: Optional[Dict] = None
     ) -> ChunkResult:
-        """
-        处理单个 chunk（带缓存和智能重试）
+        """处理单个 chunk（原生异步 + 降级策略）
 
         Args:
-            chunk_index: chunk 索引
-            chunk_content: chunk 内容
+            chunk_index: Chunk 索引
+            chunk_content: Chunk 内容
             book_title: 书名
             system_prompt: 系统提示词
-            chunk_prompt_template: chunk 提示词模板
+            chunk_prompt_template: Chunk 提示词模板
             use_cache: 是否使用缓存
+            local_hints_by_chunk: 本地预处理提示（可选）
 
         Returns:
             ChunkResult: 处理结果
         """
-        start_time = datetime.now()
+        start_time = time.time()
 
-        # Step 1: 检查缓存
+        # 🔑 优化 1：质量门控前置 - 检查输入质量
+        if len(chunk_content.strip()) < 100:
+            logger.warning(f"Chunk {chunk_index} 内容过短（{len(chunk_content)}字符），跳过处理")
+            return ChunkResult(
+                chunk_index=chunk_index,
+                success=False,
+                error="Chunk 内容过短",
+                elapsed_seconds=0.0
+            )
+
+        # Step 2: 检查缓存
         if use_cache:
             cached_result = self.cache.get_cached_result(book_title, chunk_index, chunk_content)
             if cached_result:
-                # 🔑 新增：验证缓存数据有效性（OptimizedChunkProcessor版本）
+                # 验证缓存数据有效性
                 from core.model_output_format_spec import validate_required_fields
                 is_valid, missing_fields = validate_required_fields(cached_result, field_type="chunk_analysis")
 
                 if is_valid:
-                    elapsed = (datetime.now() - start_time).total_seconds()
+                    elapsed = time.time() - start_time
                     logger.info(f"   💾 Chunk {chunk_index} 缓存命中且有效")
                     return ChunkResult(
                         chunk_index=chunk_index,
@@ -132,33 +143,33 @@ class OptimizedChunkProcessor:
                         elapsed_seconds=elapsed
                     )
                 else:
-                    # 缓存数据无效，清除并重新处理
                     logger.warning(f"   ⚠️ Chunk {chunk_index} 缓存数据无效（缺失字段: {missing_fields}），清除缓存")
-                elapsed = (datetime.now() - start_time).total_seconds()
-                return ChunkResult(
-                    chunk_index=chunk_index,
-                    success=True,
-                    result=cached_result,
-                    from_cache=True,
-                    elapsed_seconds=elapsed
-                )
 
-        # Step 2: 构建 prompt
+        # Step 3: 构建 prompt
         prompt = chunk_prompt_template.format(
             book_title=book_title,
             chunk_content=chunk_content
         )
 
-        # Step 3: 智能重试调用
+        # Step 3: 智能重试调用 + 降级策略
         for retry in range(self.max_retries):
             try:
-                # 使用 asyncio.to_thread 包装同步 LLM 调用
-                response = await asyncio.to_thread(
-                    self._call_llm_sync,
-                    system_prompt,
-                    prompt,
-                    max_tokens=16384
-                )
+                # 🔑 优化 2：优先使用原生异步调用（零开销）
+                if hasattr(self.llm_client, '_call_llm_async'):
+                    # 原生异步调用（AsyncOpenAI/AsyncAnthropic）
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                    response = await self.llm_client._call_llm_async(messages, max_tokens=16384)
+                else:
+                    # 回退：使用 asyncio.to_thread 包装同步 SDK
+                    response = await asyncio.to_thread(
+                        self._call_llm_sync,
+                        system_prompt,
+                        prompt,
+                        max_tokens=16384
+                    )
 
                 if response is None:
                     # 空响应，等待后重试
@@ -236,33 +247,147 @@ class OptimizedChunkProcessor:
                     await asyncio.sleep(actual_delay)
                     continue
 
-        # 所有重试都失败，尝试降级策略（OptimizedChunkProcessor版本）
-        logger.warning(f"⚠️ Chunk {chunk_index} 重试耗尽，尝试降级策略")
+        # 🔑 优化 3：降级策略自动化（多层级降级）
+        logger.warning(f"⚠️ Chunk {chunk_index} 重试耗尽，启动自动降级流程")
 
-        # 🔑 降级策略1: 降低max_tokens（减少截断概率）
+        # 降级策略1: 降低 max_tokens（减少截断概率）
         try:
             logger.info(f"   🔧 降级策略1: 降低max_tokens至50%")
-            response = await asyncio.to_thread(
-                self._call_llm_sync,
-                system_prompt,
-                prompt,
-                max_tokens=max(2048, 16384 // 2)
-            )
+            reduced_tokens = max(2048, 16384 // 2)
+
+            # 尝试原生异步调用
+            if hasattr(self.llm_client, '_call_llm_async'):
+                messages = [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": prompt}
+                ]
+                response = await self.llm_client._call_llm_async(messages, max_tokens=reduced_tokens)
+            else:
+                response = await asyncio.to_thread(
+                    self._call_llm_sync,
+                    system_prompt,
+                    prompt,
+                    max_tokens=reduced_tokens
+                )
+
             if response:
                 result, success, error_msg = parse_model_output(response)
                 if success and result:
-                    self.cache.save_result(book_title, chunk_index, chunk_content, result)
-                    elapsed = (datetime.now() - start_time).total_seconds()
-                    logger.info(f"   ✅ Chunk {chunk_index} 降级策略1成功")
-                    return ChunkResult(
-                        chunk_index=chunk_index,
-                        success=True,
-                        result=result,
-                        from_cache=False,
-                        elapsed_seconds=elapsed
-                    )
+                    # 🔑 新增：验证降级结果质量
+                    from core.book_graph_quality_checker import quick_validate_chunk_result
+                    is_valid, quality_score = quick_validate_chunk_result(result)
+
+                    if is_valid and quality_score >= 0.6:  # 降级接受较低质量阈值
+                        self.cache.save_result(book_title, chunk_index, chunk_content, result)
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"   ✅ Chunk {chunk_index} 降级策略1成功（质量分数: {quality_score:.2f})")
+                        return ChunkResult(
+                            chunk_index=chunk_index,
+                            success=True,
+                            result=result,
+                            from_cache=False,
+                            elapsed_seconds=elapsed
+                        )
+                    else:
+                        logger.warning(f"   ⚠️ 降级策略1结果质量不达标（分数: {quality_score:.2f}），继续降级")
         except Exception as e:
             logger.warning(f"   ⚠️ 降级策略1失败: {str(e)[:50]}")
+
+        # 降级策略2: 简化 prompt（只要求核心字段）
+        try:
+            logger.info(f"   🔧 降级策略2: 简化prompt（只要求核心字段）")
+            simplified_prompt = f"""【书籍】{book_title}
+
+【内容节选】
+{chunk_content[:2000]}
+
+【核心要求】
+请提取以下信息（JSON 格式）：
+1. chapter_summaries: 章节摘要数组（每个摘要 ≥30 字）
+2. core_concepts: 核心概念数组（每个概念名称 ≥2 字）
+
+【输出格式】
+{{"chapter_summaries": ["摘要1", "摘要2"], "core_concepts": ["概念1", "概念2"]}}"""
+
+            # 尝试简化后的调用
+            if hasattr(self.llm_client, '_call_llm_async'):
+                messages = [{"role": "user", "content": simplified_prompt}]
+                response = await self.llm_client._call_llm_async(messages, max_tokens=4096)
+            else:
+                response = await asyncio.to_thread(
+                    self._call_llm_sync,
+                    "",  # 简化 prompt 不需要 system prompt
+                    simplified_prompt,
+                    max_tokens=4096
+                )
+
+            if response:
+                result, success, error_msg = parse_model_output(response)
+                if success and result:
+                    # 简化结果仍需包含核心字段
+                    if 'chapter_summaries' in result or 'core_concepts' in result:
+                        self.cache.save_result(book_title, chunk_index, chunk_content, result)
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"   ✅ Chunk {chunk_index} 降级策略2成功")
+                        return ChunkResult(
+                            chunk_index=chunk_index,
+                            success=True,
+                            result=result,
+                            from_cache=False,
+                            elapsed_seconds=elapsed
+                        )
+        except Exception as e:
+            logger.warning(f"   ⚠️ 降级策略2失败: {str(e)[:50]}")
+
+        # 降级策略3: 回退到更稳定模型（如 DeepSeek-V3）
+        try:
+            logger.info(f"   🔧 降级策略3: 回退到稳定模型（DeepSeek-V3）")
+            # 检查是否有备选模型配置
+            fallback_model = "deepseek-chat"  # 或从 config 读取
+
+            if hasattr(self.llm_client, 'switch_model'):
+                # 切换模型后重试
+                self.llm_client.switch_model(fallback_model)
+
+                if hasattr(self.llm_client, '_call_llm_async'):
+                    messages = [
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": prompt}
+                    ]
+                    response = await self.llm_client._call_llm_async(messages, max_tokens=16384)
+                else:
+                    response = await asyncio.to_thread(
+                        self._call_llm_sync,
+                        system_prompt,
+                        prompt,
+                        max_tokens=16384
+                    )
+
+                if response:
+                    result, success, error_msg = parse_model_output(response)
+                    if success and result:
+                        self.cache.save_result(book_title, chunk_index, chunk_content, result)
+                        elapsed = (datetime.now() - start_time).total_seconds()
+                        logger.info(f"   ✅ Chunk {chunk_index} 降级策略3成功（使用备选模型）")
+                        return ChunkResult(
+                            chunk_index=chunk_index,
+                            success=True,
+                            result=result,
+                            from_cache=False,
+                            elapsed_seconds=elapsed
+                        )
+        except Exception as e:
+            logger.warning(f"   ⚠️ 降级策略3失败: {str(e)[:50]}")
+
+        # 所有降级策略都失败
+        elapsed = (datetime.now() - start_time).total_seconds()
+        logger.error(f"   ❌ Chunk {chunk_index} 所有降级策略失败")
+        return ChunkResult(
+            chunk_index=chunk_index,
+            success=False,
+            error="所有重试和降级策略失败",
+            elapsed_seconds=elapsed
+        )
 
         # 🔑 降级策略2: 简化prompt（只要求核心字段）
         try:
