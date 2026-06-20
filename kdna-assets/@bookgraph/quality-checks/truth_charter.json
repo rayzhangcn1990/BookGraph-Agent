@@ -1,0 +1,68 @@
+{
+  "$schema": "https://aikdna.com/schema/truth_charter.json",
+  "tc_id": "tc_bookgraph_quality_checks_v1_2026_06_20",
+  "domain_id": "@bookgraph/quality-checks",
+  "tc_status": "locked",
+  "locked_at": "2026-06-20T00:00:00Z",
+  "locked_by": "BookGraph-Agent Team",
+  "highest_question": "书籍知识图谱是否符合质量标准？",
+  "core_insight": "高质量知识图谱应保留原文结构、提取核心论点、避免LLM偷懒合并章节或使用占位符",
+  "in_scope": [
+    "章节完整性检查（章节数量、编号连续性）",
+    "核心概念质量检查（定义深度、占位符检测）",
+    "金句萃取质量检查（来源标注、背景语境）",
+    "批判性分析完整性检查（多视角覆盖）",
+    "占位符污染检测（关键内容字段）",
+    "章节合并偷懒行为检测",
+    "模板化内容检测（语义相似度）",
+    "底层逻辑格式检查",
+    "必填字段完整性检查",
+    "数据流验证（metadata → chapters → concepts）"
+  ],
+  "out_of_scope": [
+    "书籍内容的事实性校验（需外部知识库）",
+    "跨书籍的知识关联（需学科图谱）",
+    "LLM输出的事实准确性（需人工审核）",
+    "书籍元数据的真实性（需出版社API）",
+    "金句的版权合规性（需法律审核）"
+  ],
+  "highest_axiom_protected": "知识图谱应忠实反映书籍内容，禁止LLM简化或合并章节",
+  "forbidden_simplifications": [
+    "章节编号使用合并格式（如'11-22'、'第1-10章'）",
+    "关键内容使用占位符（如'待补充'、'TBD'、'N/A'）",
+    "概念定义过短（少于30字）",
+    "金句缺少来源章节或背景语境",
+    "批判性分析视角缺失（女性主义、后殖民主义等）",
+    "模板化表述（'本章主要讨论'、'作者通过逻辑推理'）",
+    "空洞章节（内容少于50字符）",
+    "底层逻辑格式不规范（缺少前提假设、推理链条、核心结论）"
+  ],
+  "renamed_terms": [
+    {
+      "old": "章节摘要",
+      "new": "chapter_summaries",
+      "effective_from": "1.0.0"
+    },
+    {
+      "old": "核心概念",
+      "new": "core_concepts",
+      "effective_from": "1.0.0"
+    },
+    {
+      "old": "金句",
+      "new": "golden_quotes",
+      "effective_from": "1.0.0"
+    }
+  ],
+  "anti_drift_rules": [
+    "占位符关键词列表必须覆盖所有常见占位符（待补充、TBD、TODO、N/A等）",
+    "章节合并检测模式必须覆盖所有合并格式（数字-数字、第X-Y章等）",
+    "模板检测相似度阈值不得低于0.85（避免误判正常内容）",
+    "底层逻辑格式必须包含三个要素：前提假设、推理链条、核心结论",
+    "金句提取必须包含四个必填字段：text、chapter、background_context、underlying_logic",
+    "批判性分析必须包含至少两个视角（女性主义、后殖民主义等）",
+    "质量评分低于70分必须触发重试机制",
+    "章节覆盖率低于80%必须发出警告"
+  ],
+  "judgment_authority_holder": "BookGraph Quality Checker v2"
+}

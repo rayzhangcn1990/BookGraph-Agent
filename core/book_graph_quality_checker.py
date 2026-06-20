@@ -29,6 +29,13 @@ try:
 except ImportError:
     SEMANTIC_DETECTION_AVAILABLE = False
 
+# ponytail: 尝试导入KDNA集成模块（可选）
+try:
+    from core.kdna_integration import get_kdna_quality_checker
+    KDNA_INTEGRATION_AVAILABLE = True
+except ImportError:
+    KDNA_INTEGRATION_AVAILABLE = False
+
 logger = logging.getLogger("BookGraph-Agent")
 
 

@@ -1,0 +1,213 @@
+{
+  "$schema": "https://aikdna.com/schema/kdna_manifest.json",
+  "kdna_version": "1.0",
+  "domain_id": "@bookgraph/quality-checks",
+  "domain_version": "1.0.0",
+  "name": "BookGraph Quality Checks",
+  "description": "书籍知识图谱质量检查规则集：占位符检测、章节合并检测、模板化内容检测等10项检查",
+  "author": "BookGraph-Agent Team",
+  "created_at": "2026-06-20T00:00:00Z",
+  "payload_profile": "judgment-profile-v1",
+  "axioms": [
+    {
+      "id": "no-placeholder-pollution",
+      "statement": "关键内容字段不应包含占位符（待补充、TBD、N/A等）",
+      "category": "content_quality",
+      "severity": "blocking",
+      "boundaries": [
+        "metadata.title",
+        "metadata.author",
+        "chapters[*].core_argument",
+        "core_concepts[*].definition",
+        "key_quotes[*].text"
+      ],
+      "self_check": "检查以上字段是否包含PLACEHOLDER_KEYWORDS列表中的任一关键词",
+      "remediation": "移除占位符或标记为需人工补充"
+    },
+    {
+      "id": "no-chapter-merge",
+      "statement": "章节编号不应使用合并格式（1-10、第11-22章等）",
+      "category": "structural_integrity",
+      "severity": "blocking",
+      "boundaries": [
+        "chapters[*].chapter_number",
+        "chapters[*].title"
+      ],
+      "self_check": "检查chapter_number是否匹配MERGED_CHAPTER_PATTERNS模式",
+      "remediation": "拆分合并章节，每个章节独立编号"
+    },
+    {
+      "id": "no-empty-chapters",
+      "statement": "章节内容不应为空或少于50字符",
+      "category": "content_quality",
+      "severity": "blocking",
+      "boundaries": [
+        "chapters[*].core_argument",
+        "chapters[*].underlying_logic"
+      ],
+      "self_check": "检查core_argument + underlying_logic长度是否<50字符",
+      "remediation": "标记为空洞章节，触发重试机制"
+    },
+    {
+      "id": "no-template-content",
+      "statement": "内容不应是模板化表述（语义相似度>0.85判定）",
+      "category": "content_quality",
+      "severity": "blocking",
+      "boundaries": [
+        "chapters[*].title",
+        "key_insights[*].description"
+      ],
+      "self_check": "使用sentence-transformers计算与TEMPLATE_PATTERNS的语义相似度",
+      "remediation": "重写模板化内容，注入具体信息"
+    },
+    {
+      "id": "concept-definition-depth",
+      "statement": "核心概念定义应超过30字，包含深层含义",
+      "category": "content_depth",
+      "severity": "warning",
+      "boundaries": [
+        "core_concepts[*].definition",
+        "core_concepts[*].deep_meaning"
+      ],
+      "self_check": "检查definition长度是否<30字符",
+      "remediation": "扩展概念定义，补充深层含义"
+    },
+    {
+      "id": "quote-source-attribution",
+      "statement": "金句必须标注来源章节、背景语境和底层逻辑",
+      "category": "evidence_quality",
+      "severity": "warning",
+      "boundaries": [
+        "key_quotes[*].chapter",
+        "key_quotes[*].background_context",
+        "key_quotes[*].underlying_logic"
+      ],
+      "self_check": "检查以上字段是否存在且非空",
+      "remediation": "补充金句来源信息和语境"
+    },
+    {
+      "id": "critical-analysis-coverage",
+      "statement": "批判性分析应包含至少两个视角（女性主义、后殖民主义等）",
+      "category": "critical_thinking",
+      "severity": "warning",
+      "boundaries": [
+        "critical_analysis.feminist_perspective",
+        "critical_analysis.postcolonial_perspective"
+      ],
+      "self_check": "检查以上字段是否存在且长度>50字符",
+      "remediation": "补充缺失的批判视角分析"
+    },
+    {
+      "id": "underlying-logic-format",
+      "statement": "底层逻辑应遵循格式：前提假设→推理链条→核心结论",
+      "category": "logical_rigor",
+      "severity": "warning",
+      "boundaries": [
+        "chapters[*].underlying_logic",
+        "core_concepts[*].underlying_logic"
+      ],
+      "self_check": "检查是否匹配LOGIC_PATTERN正则表达式",
+      "remediation": "规范化底层逻辑格式"
+    },
+    {
+      "id": "required-fields-completeness",
+      "statement": "必填字段应完整存在（metadata、chapters、core_concepts等）",
+      "category": "structural_integrity",
+      "severity": "blocking",
+      "boundaries": [
+        "metadata",
+        "time_background",
+        "critical_analysis",
+        "chapters",
+        "core_concepts",
+        "key_insights",
+        "key_cases",
+        "key_quotes"
+      ],
+      "self_check": "检查REQUIRED_TOP_FIELDS是否全部存在",
+      "remediation": "补齐缺失的必填字段"
+    },
+    {
+      "id": "chapter-coverage-rate",
+      "statement": "章节覆盖率应接近100%（实际章节数/预期章节数≥0.8）",
+      "category": "completeness",
+      "severity": "warning",
+      "boundaries": [
+        "chapters[*]"
+      ],
+      "self_check": "计算chapter_count / expected_chapters",
+      "remediation": "检查是否有章节被LLM过滤或合并"
+    }
+  ],
+  "boundaries": {
+    "content_fields": [
+      "metadata.title",
+      "metadata.author",
+      "chapters[*].core_argument",
+      "core_concepts[*].definition",
+      "key_quotes[*].text"
+    ],
+    "structural_fields": [
+      "chapters[*].chapter_number",
+      "chapters[*].title"
+    ],
+    "evidence_fields": [
+      "key_quotes[*].chapter",
+      "key_quotes[*].background_context"
+    ]
+  },
+  "self_checks": [
+    {
+      "check_id": "placeholder_detection",
+      "description": "占位符污染检测",
+      "keywords": ["待补充", "待分析", "TBD", "TODO", "N/A", "NULL"],
+      "threshold": 0,
+      "action": "block"
+    },
+    {
+      "check_id": "chapter_merge_detection",
+      "description": "章节合并检测",
+      "patterns": ["\\d+-\\d+", "第\\d+-\\d+章", "\\d+至\\d+"],
+      "threshold": 0,
+      "action": "block"
+    },
+    {
+      "check_id": "template_detection",
+      "description": "模板化内容检测（语义相似度）",
+      "similarity_threshold": 0.85,
+      "action": "block"
+    },
+    {
+      "check_id": "chapter_coverage",
+      "description": "章节覆盖率检查",
+      "threshold": 0.8,
+      "action": "warn"
+    }
+  ],
+  "remediation_strategies": [
+    {
+      "trigger": "placeholder_detected",
+      "strategy": "标记为需人工补充，不阻塞写入"
+    },
+    {
+      "trigger": "chapter_merge_detected",
+      "strategy": "触发重试机制，要求LLM重新生成章节"
+    },
+    {
+      "trigger": "template_detected",
+      "strategy": "重写模板化内容，注入具体信息"
+    },
+    {
+      "trigger": "coverage_low",
+      "strategy": "发出警告，记录到质量报告"
+    }
+  ],
+  "metadata": {
+    "language": "zh-CN",
+    "tags": ["quality", "book-graph", "validation", "llm-output"],
+    "compatibility": {
+      "python_version": ">=3.8",
+      "dependencies": ["sentence-transformers", "pydantic"]
+    }
+  }
+}

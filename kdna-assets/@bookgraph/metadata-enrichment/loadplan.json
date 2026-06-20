@@ -1,0 +1,159 @@
+{
+  "$schema": "https://aikdna.com/schema/kdna_loadplan.json",
+  "load_plan_id": "lp_metadata_enrichment_v1",
+  "domain_id": "@bookgraph/metadata-enrichment",
+  "description": "书籍元数据增强LoadPlan：OpenLibrary → Google Books → LLM三层fallback",
+  "stages": [
+    {
+      "stage_id": "openlibrary_lookup",
+      "order": 1,
+      "source": "openlibrary",
+      "description": "OpenLibrary API查询（免费无需Key）",
+      "trigger": "isbn或title+author输入",
+      "action": "fetch",
+      "endpoint": "https://openlibrary.org/api/books",
+      "params": {
+        "bibkeys": "ISBN:{isbn}",
+        "format": "json",
+        "jscmd": "data"
+      },
+      "validation": {
+        "required_fields": ["title", "author"],
+        "checksum": "sha256:计算响应哈希用于缓存",
+        "ttl_seconds": 2592000
+      },
+      "on_failure": "fallback_to_next_stage",
+      "on_success": "cache_result"
+    },
+    {
+      "stage_id": "googlebooks_lookup",
+      "order": 2,
+      "source": "googlebooks",
+      "description": "Google Books API查询（备选数据源）",
+      "trigger": "openlibrary失败或数据不完整",
+      "action": "fetch",
+      "endpoint": "https://www.googleapis.com/books/v1/volumes",
+      "params": {
+        "q": "intitle:{title} inauthor:{author}",
+        "maxResults": 5
+      },
+      "validation": {
+        "required_fields": ["title", "author"],
+        "optional_fields": ["description", "rating", "ratings_count"],
+        "checksum": "sha256:计算响应哈希",
+        "ttl_seconds": 2592000
+      },
+      "on_failure": "fallback_to_next_stage",
+      "on_success": "cache_result"
+    },
+    {
+      "stage_id": "llm_fallback",
+      "order": 3,
+      "source": "llm",
+      "description": "LLM fallback生成元数据（API无数据时的兜底）",
+      "trigger": "openlibrary和googlebooks都失败",
+      "action": "generate",
+      "prompt_template": "请提供《{title}》（作者：{author}）的基本信息（作者、出版年份、出版社），用JSON格式返回。",
+      "validation": {
+        "required_fields": ["title", "author"],
+        "min_length": {
+          "author_intro": 200
+        },
+        "checksum": "不适用（动态生成）"
+      },
+      "on_failure": "return_empty_dict",
+      "on_success": "mark_source_as_llm"
+    },
+    {
+      "stage_id": "author_enrichment",
+      "order": 4,
+      "source": "wikipedia",
+      "description": "Wikipedia作者信息增强",
+      "trigger": "元数据已获取且包含author字段",
+      "action": "enrich",
+      "endpoint": "https://zh.wikipedia.org/w/api.php",
+      "params": {
+        "action": "query",
+        "list": "search",
+        "srsearch": "{author}",
+        "format": "json"
+      },
+      "validation": {
+        "min_length": {
+          "author_intro": 100
+        },
+        "checksum": "sha256:计算响应哈希"
+      },
+      "on_failure": "llm_author_fallback",
+      "on_success": "merge_with_metadata"
+    },
+    {
+      "stage_id": "llm_author_fallback",
+      "order": 5,
+      "source": "llm",
+      "description": "LLM生成作者简介（Wikipedia无数据时）",
+      "trigger": "Wikipedia查询失败",
+      "action": "generate",
+      "prompt_template": "请用200-300字介绍{author}的生平和主要贡献，包括出生年份、国籍、主要作品、思想流派。",
+      "validation": {
+        "min_length": {
+          "author_intro": 200
+        }
+      },
+      "on_failure": "return_empty_string",
+      "on_success": "merge_with_metadata"
+    }
+  ],
+  "fallback_chain": [
+    "openlibrary_lookup",
+    "googlebooks_lookup",
+    "llm_fallback"
+  ],
+  "cache_policy": {
+    "enabled": true,
+    "storage": "sqlite",
+    "path": ".cache/metadata/metadata_cache.db",
+    "ttl_days": 30,
+    "checksum_verification": true
+  },
+  "checksums": {
+    "algorithm": "sha256",
+    "verify_on_load": true,
+    "regenerate_on_failure": true
+  },
+  "validation_rules": [
+    {
+      "rule_id": "required_fields",
+      "description": "必填字段检查",
+      "fields": ["title", "author"],
+      "action": "block_if_missing"
+    },
+    {
+      "rule_id": "author_intro_length",
+      "description": "作者简介长度检查",
+      "field": "author_intro",
+      "min_length": 200,
+      "action": "warn_if_short"
+    },
+    {
+      "rule_id": "source_tracking",
+      "description": "数据源追踪",
+      "field": "source",
+      "allowed_values": ["openlibrary", "googlebooks", "llm", "wikipedia"],
+      "action": "enforce"
+    }
+  ],
+  "error_handling": {
+    "on_stage_failure": "fallback_to_next_stage",
+    "on_all_stages_failed": "return_partial_result",
+    "retry_policy": {
+      "max_retries": 3,
+      "backoff_seconds": [5, 15, 45]
+    }
+  },
+  "metadata": {
+    "version": "1.0.0",
+    "created_at": "2026-06-20T00:00:00Z",
+    "author": "BookGraph-Agent Team"
+  }
+}
