@@ -17,8 +17,19 @@ BookGraph 内容质量校验模块 V2
 """
 
 import re
+import logging
 from typing import Dict, List, Tuple
 from dataclasses import dataclass
+
+# ponytail: 尝试导入sentence-transformers（可选依赖）
+try:
+    from sentence_transformers import SentenceTransformer
+    from sklearn.metrics.pairwise import cosine_similarity
+    SEMANTIC_DETECTION_AVAILABLE = True
+except ImportError:
+    SEMANTIC_DETECTION_AVAILABLE = False
+
+logger = logging.getLogger("BookGraph-Agent")
 
 
 @dataclass
@@ -33,6 +44,12 @@ class QualityCheckResult:
 
 class BookGraphQualityChecker:
     """BookGraph 内容质量校验器 V2"""
+
+    # ponytail: 语义相似度阈值（用于模板检测）
+    TEMPLATE_SIMILARITY_THRESHOLD = 0.85  # 相似度>0.85判定为模板
+
+    # ponytail: 语义检测模型（sentence-transformers）
+    _semantic_model = None  # 懒加载
 
     # ═══════════════════════════════════════════════════════════
     # 占位符关键词（严禁出现）- 扩展版
@@ -788,10 +805,82 @@ class BookGraphQualityChecker:
         return False
 
     def _is_template_content(self, text: str) -> bool:
-        """检查是否是模板化内容"""
+        """
+        检查是否是模板化内容（优化版：语义相似度检测）
+
+        ponytail: 关键词匹配误判率高，改用语义相似度
+        - "本章主要讨论黑格尔辩证法..."被误判为模板
+        - 语义相似度可区分"模板填充"和"正常表述"
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            bool: 是否为模板化内容
+        """
         if not text:
             return False
 
+        # ponytail: 优先使用语义检测（如果可用）
+        if SEMANTIC_DETECTION_AVAILABLE:
+            return self._is_template_by_semantic_similarity(text)
+
+        # ponytail: 回退到关键词匹配（如果没有sentence-transformers）
+        for pattern in self.TEMPLATE_PATTERNS:
+            if pattern in text:
+                return True
+
+        return False
+
+    def _is_template_by_semantic_similarity(self, text: str) -> bool:
+        """
+        语义相似度检测（模板化内容）
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            bool: 相似度>0.85判定为模板
+        """
+        # ponytail: 懒加载模型（避免每次检查都初始化）
+        if self._semantic_model is None:
+            try:
+                self._semantic_model = SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')
+            except Exception:
+                # 模型加载失败，回退到关键词匹配
+                logger.warning("⚠️ sentence-transformers模型加载失败，回退到关键词匹配")
+                return self._fallback_keyword_detection(text)
+
+        try:
+            # 计算文本与模板库的相似度
+            text_embedding = self._semantic_model.encode([text])
+            template_embeddings = self._semantic_model.encode(self.TEMPLATE_PATTERNS)
+
+            # 计算余弦相似度
+            similarities = cosine_similarity(text_embedding, template_embeddings)
+            max_similarity = similarities.max()
+
+            # ponytail: 相似度>0.85判定为模板
+            if max_similarity > self.TEMPLATE_SIMILARITY_THRESHOLD:
+                logger.debug(f"模板相似度: {max_similarity:.2f} > {self.TEMPLATE_SIMILARITY_THRESHOLD}")
+                return True
+
+            return False
+
+        except Exception as e:
+            logger.warning(f"⚠️ 语义检测失败: {e}")
+            return self._fallback_keyword_detection(text)
+
+    def _fallback_keyword_detection(self, text: str) -> bool:
+        """
+        关键词匹配回退方案（当语义检测不可用时）
+
+        Args:
+            text: 待检测文本
+
+        Returns:
+            bool: 是否为模板化内容
+        """
         for pattern in self.TEMPLATE_PATTERNS:
             if pattern in text:
                 return True

@@ -295,9 +295,10 @@ class ModelPoolManager:
 
     async def verify_model(self, model: ModelStatus) -> Tuple[bool, float]:
         """
-        验证单个模型可用性
+        验证单个模型可用性（优化版：测试JSON解析能力）
 
-        发送简单测试请求，测量响应时间
+        ponytail: 生产负载痛点是JSON解析失败，而非简单响应
+        测试用例从"1+1=?"改为生成JSON，验证解析能力
 
         Args:
             model: 模型状态
@@ -305,10 +306,13 @@ class ModelPoolManager:
         Returns:
             Tuple[bool, float]: (是否可用, 响应时间)
         """
-        test_prompt = "请回答：1+1=?（只回答数字）"
+        # ponytail: 测试prompt改为生成JSON（匹配生产负载）
+        test_prompt = """请生成简单JSON：{"name": "测试", "value": 123}
+只输出JSON，不要其他内容。"""
 
         try:
             import openai
+            import json
 
             # 构建客户端
             default_headers = {}
@@ -330,7 +334,7 @@ class ModelPoolManager:
             response = client.chat.completions.create(
                 model=model.model_id,
                 messages=[{"role": "user", "content": test_prompt}],
-                max_tokens=10,
+                max_tokens=50,
                 temperature=0,
             )
 
@@ -340,9 +344,34 @@ class ModelPoolManager:
             # 检查响应
             if response and response.choices:
                 content = response.choices[0].message.content
-                if content and any(char.isdigit() for char in content):
-                    logger.info(f"✅ {model.model_id} 可用 ({elapsed:.2f}s)")
-                    return True, elapsed
+
+                # ponytail: 🔑 关键修复 - 验证JSON解析能力（而非仅响应）
+                try:
+                    # 提取JSON（兼容模型可能在前后添加说明文本）
+                    json_start = content.find('{')
+                    json_end = content.rfind('}') + 1
+
+                    if json_start >= 0 and json_end > json_start:
+                        json_str = content[json_start:json_end]
+                        parsed = json.loads(json_str)
+
+                        # 验证关键字段存在
+                        if parsed.get('name') and parsed.get('value'):
+                            logger.info(f"✅ {model.model_id} 可用且JSON解析正常 ({elapsed:.2f}s)")
+                            return True, elapsed
+                        else:
+                            logger.warning(f"⚠️ {model.model_id} JSON字段缺失: {parsed}")
+                            return False, elapsed
+                    else:
+                        logger.warning(f"⚠️ {model.model_id} 响应未包含JSON: {content[:50]}")
+                        return False, elapsed
+
+                except json.JSONDecodeError as e:
+                    logger.warning(f"⚠️ {model.model_id} JSON解析失败: {str(e)[:50]}")
+                    # ponytail: 记录JSON解析失败（用于评估层）
+                    model.failure_count += 1
+                    model.consecutive_failures += 1
+                    return False, elapsed
 
             logger.warning(f"⚠️ {model.model_id} 响应异常")
             return False, elapsed
