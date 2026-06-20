@@ -485,7 +485,12 @@ def repair_truncated_json(json_str: str) -> str:
 
 def parse_model_output(content: str, field_type: str = "chunk_analysis", model_id: str = "unknown") -> tuple:
     """
-    解析模型输出（三层防护）
+    解析模型输出（优化版：简化三层防护）
+
+    ponytail: 三层防护过于复杂（618行），简化为：
+    1. 尝试直接解析JSON
+    2. 失败时使用json_repair库修复
+    3. 最终fallback返回raw_response
 
     Args:
         content: 模型返回的原始内容
@@ -498,123 +503,99 @@ def parse_model_output(content: str, field_type: str = "chunk_analysis", model_i
     import json
 
     if content is None:
-        # 🔑 空内容也要返回partial结果，不丢弃
         return {
             "raw_response": None,
             "extraction_status": "partial",
             "error": "LLM 返回空内容"
-        }, False, "LLM 返回空内容，已记录"
+        }, False, "LLM 返回空内容"
 
-    # Step 1: 清理内容 - 🔑 关键修复：先清理 markdown 和注释
-    content = repair_truncated_json(content.strip())
+    # ponytail: Step 1 - 清理内容（移除markdown代码块）
+    content_cleaned = repair_truncated_json(content.strip())
 
-    # Step 2: 提取 JSON
+    # ponytail: Step 2 - 尝试直接解析
     try:
-        # 尝试直接解析
+        result = json.loads(content_cleaned)
+        result = normalize_field_names(result)
+
+        # 补齐缺失字段（chunk分析允许部分字段缺失）
+        if field_type == "chunk_analysis":
+            for field in REQUIRED_FIELDS.get(field_type, []):
+                result.setdefault(field, [])
+
+        # 验证必要字段
+        is_valid, missing = validate_required_fields(result, field_type)
+        if not is_valid:
+            return result, False, f"缺少必要字段: {missing}"
+
+        return result, True, "解析成功"
+
+    except json.JSONDecodeError:
+        # ponytail: Step 3 - 使用json_repair库修复（更可靠）
         try:
-            result = json.loads(content)
-        except json.JSONDecodeError:
-            # 🔑 新增：尝试使用json_repair库（更可靠的修复）
+            import json_repair
+            result = json_repair.loads(content_cleaned)
+            result = normalize_field_names(result)
+
+            logger.info("   ✅ 使用json_repair库成功修复JSON")
+
+            # 补齐缺失字段
+            if field_type == "chunk_analysis":
+                for field in REQUIRED_FIELDS.get(field_type, []):
+                    result.setdefault(field, [])
+
+            return result, True, "json_repair修复成功"
+
+        except ImportError:
+            # ponytail: Step 4 - json_repair未安装，提取第一个JSON对象
+            json_start = content_cleaned.find('{')
+            if json_start < 0:
+                logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
+                return {
+                    "raw_response": content[:5000],
+                    "extraction_status": "partial",
+                    "error": "未找到JSON结构"
+                }, False, "未找到JSON结构，已保存raw_response"
+
+            # 深度匹配找完整JSON
+            depth = 0
+            json_end = json_start
+            for i, c in enumerate(content_cleaned[json_start:], json_start):
+                if c == '{':
+                    depth += 1
+                elif c == '}':
+                    depth -= 1
+                    if depth == 0:
+                        json_end = i + 1
+                        break
+
+            json_str = content_cleaned[json_start:json_end]
+
             try:
-                import json_repair
-                result = json_repair.loads(content)
-                logger.info("   ✅ 使用json_repair库成功修复JSON")
-            except ImportError:
-                # json_repair未安装，回退到传统方法
-                # 提取第一个完整 JSON 对象
-                json_start = content.find('{')
-                if json_start < 0:
-                    # 🔑 没有JSON结构，直接返回raw_response
-                    logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
-                    return {
-                        "raw_response": content[:5000],
-                        "extraction_status": "partial",
-                        "error": "未找到JSON结构"
-                    }, False, "未找到JSON结构，已保存raw_response"
+                result = json.loads(json_str)
+                result = normalize_field_names(result)
 
-                # 使用深度匹配找完整 JSON
-                depth = 0
-                json_end = json_start
-                for i, c in enumerate(content[json_start:], json_start):
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            json_end = i + 1
-                            break
+                # 补齐缺失字段
+                if field_type == "chunk_analysis":
+                    for field in REQUIRED_FIELDS.get(field_type, []):
+                        result.setdefault(field, [])
 
-                json_str = content[json_start:json_end]
+                return result, True, "提取JSON成功"
 
-                # 尝试解析
-                try:
-                    result = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    # 🔑 Fallback: 保存raw_response，不丢弃！
-                    logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
-                    return {
-                        "raw_response": content[:5000],  # 保存前5000字符
-                        "extraction_status": "partial",
-                        "error": str(e)[:100]
-                    }, False, f"JSON 解析失败，已保存raw_response"
+            except json.JSONDecodeError as e:
+                logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
+                return {
+                    "raw_response": content[:5000],
+                    "extraction_status": "partial",
+                    "error": str(e)[:100]
+                }, False, f"JSON 解析失败，已保存raw_response"
 
-            except Exception as e:
-                # json_repair库也失败了，回退到传统方法
-                json_start = content.find('{')
-                if json_start < 0:
-                    logger.warning(f"⚠️ 未找到JSON结构，已保存原始响应({len(content)}字符)")
-                    return {
-                        "raw_response": content[:5000],
-                        "extraction_status": "partial",
-                        "error": "未找到JSON结构"
-                    }, False, "未找到JSON结构，已保存raw_response"
-
-                depth = 0
-                json_end = json_start
-                for i, c in enumerate(content[json_start:], json_start):
-                    if c == '{':
-                        depth += 1
-                    elif c == '}':
-                        depth -= 1
-                        if depth == 0:
-                            json_end = i + 1
-                            break
-
-                json_str = content[json_start:json_end]
-
-                try:
-                    result = json.loads(json_str)
-                except json.JSONDecodeError as e:
-                    logger.warning(f"⚠️ JSON解析失败，已保存原始响应({len(content)}字符)")
-                    return {
-                        "raw_response": content[:5000],
-                        "extraction_status": "partial",
-                        "error": str(e)[:100]
-                    }, False, f"JSON 解析失败，已保存raw_response"
-
-    except Exception as e:
-        # 🔑 Fallback: 异常时也保存raw_response
-        logger.warning(f"⚠️ 解析异常，已保存原始响应({len(content)}字符)")
-        return {
-            "raw_response": content[:5000] if content else None,
-            "extraction_status": "partial",
-            "error": str(e)[:100]
-        }, False, f"解析异常，已保存raw_response"
-
-    # Step 4: 规范化字段名
-    result = normalize_field_names(result)
-
-    # Step 4.5: chunk 分析允许部分字段缺失，统一补为空数组
-    if field_type == "chunk_analysis":
-        for field in REQUIRED_FIELDS.get(field_type, []):
-            result.setdefault(field, [])
-
-    # Step 5: 验证必要字段（使用正确的 field_type）
-    is_valid, missing = validate_required_fields(result, field_type)
-    if not is_valid:
-        return result, False, f"缺少必要字段: {missing}"
-
-    return result, True, "解析成功"
+        except Exception as e:
+            logger.warning(f"⚠️ 解析异常，已保存原始响应({len(content)}字符)")
+            return {
+                "raw_response": content[:5000],
+                "extraction_status": "partial",
+                "error": str(e)[:100]
+            }, False, f"解析异常，已保存raw_response"
 
 
 # ═══════════════════════════════════════════════════════════

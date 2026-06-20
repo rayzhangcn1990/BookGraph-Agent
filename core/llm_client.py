@@ -188,120 +188,57 @@ class LLMClient:
                 self.token_encoder = tiktoken.get_encoding("cl100k_base")
 
     def _init_client(self):
-        """初始化 LLM 客户端"""
-        self.dashscope_api_key = None
-        self.anthropic_client = None
-        self.openai_client = None
-        self.use_hermes_llm = False
+        """
+        初始化 LLM 客户端（简化版：只保留OpenAI兼容路径）
 
-        # 🔑 初始化多API源管理器
+        ponytail: 移除Anthropic/DashScope/Hermes路径（违反YAGNI原则）
+        实际使用场景：只需要localhost:3001 OpenAI兼容端点（覆盖95%场景）
+        """
+        self.openai_client = None
+
+        # ponytail: Step 1 - 初始化多API源管理器（如果配置）
         if self.config.get('api_sources'):
             self.multi_source_manager = MultiSourceAPIManager(self.config)
-
-            # 🔑 初始化模型池管理器（新增）
             self.model_pool_manager = ModelPoolManager(self.config)
 
             source = self.multi_source_manager.get_current_source()
-            if source:
+            if source and OPENAI_AVAILABLE:
                 self.api_base = source.api_base
-                api_key = source.api_key
+                self.openai_client = create_client_from_source(source)
 
-                if OPENAI_AVAILABLE:
-                    # 使用 create_client_from_source 自动处理特殊头
-                    self.openai_client = create_client_from_source(source)
-                    if self.openai_client:
-                        self.provider = 'anthropic'
+                if self.openai_client:
+                    logger.info(f"✅ 多源API初始化成功（源：{source.name}）")
+                    logger.info(f"   API Base: {source.api_base}")
+                    self._select_model_from_pool()
+                    return
 
-                        logger.info(f"✅ 多源API初始化成功（源：{source.name}）")
-                        logger.info(f"   API Base: {source.api_base}")
+        # ponytail: Step 2 - 从config直接创建OpenAI客户端（主路径）
+        if OPENAI_AVAILABLE:
+            config_api_base = self.config.get('api_base', 'http://localhost:3001/v1')
+            config_api_key = self.config.get('api_key', 'unused')
 
-                        # 🔑 使用模型池管理器选择模型（替换旧逻辑）
-                        self._select_model_from_pool()
-                        return
+            # 增强超时控制
+            import httpx
+            timeout_config = httpx.Timeout(
+                connect=30.0,
+                read=self.config.get('timeout', 240),
+                write=30.0,
+                pool=30.0
+            )
 
-        # 🔑 优先尝试 Anthropic 兼容端点（当 provider 为 anthropic 时）
-        if self.provider == 'anthropic' and ANTHROPIC_AVAILABLE:
-            api_key_env = os.environ.get('ANTHROPIC_AUTH_TOKEN') or os.environ.get('ANTHROPIC_API_KEY', '')
-            base_url_env = os.environ.get('ANTHROPIC_BASE_URL', '')
+            self.openai_client = openai.OpenAI(
+                api_key=config_api_key,
+                base_url=config_api_base,
+                timeout=timeout_config,
+            )
+            self.provider = 'openai'
+            logger.info(f"✅ OpenAI客户端初始化成功（模型: {self.model}）")
+            logger.info(f"   API Base: {config_api_base}")
+            logger.info(f"   超时配置: 连接={timeout_config.connect}s, 读取={timeout_config.read}s")
+            return
 
-            # 从 Claude Code settings.json 读取（总是读取 model，因为配置可能滞后）
-            settings_path = Path.home() / '.claude' / 'settings.json'
-            if settings_path.exists():
-                try:
-                    with open(settings_path) as f:
-                        env = json.load(f).get('env', {})
-                    api_key_env = api_key_env or env.get('ANTHROPIC_AUTH_TOKEN', '')
-                    base_url_env = base_url_env or env.get('ANTHROPIC_BASE_URL', '')
-                    if env.get('ANTHROPIC_MODEL'):
-                        self.model = env.get('ANTHROPIC_MODEL', self.model)
-                except Exception:
-                    pass
-
-            if api_key_env and base_url_env:
-                # 创建 Anthropic 原生客户端（备用）
-                self.anthropic_client = anthropic.Anthropic(
-                    api_key=api_key_env,
-                    base_url=base_url_env,
-                    timeout=180,
-                )
-                # 🔑 同时创建 OpenAI 客户端 — 需要 /v1 前缀
-                if OPENAI_AVAILABLE:
-                    self.openai_client = openai.OpenAI(
-                        api_key=api_key_env,
-                        base_url=base_url_env.rstrip("/") + "/v1",
-                        timeout=180,
-                    )
-                self.provider = 'anthropic'
-                logger.info(f"✅ 客户端初始化成功（模型：{self.model}）")
-                logger.info(f"   API Base: {base_url_env}")
-                return
-
-        # 尝试 DashScope
-        if OPENAI_AVAILABLE and not self.openai_client and not self.anthropic_client:
-            api_key_env = os.environ.get('DASHSCOPE_API_KEY', '')
-            api_base_env = os.environ.get('DASHSCOPE_BASE_URL', 'https://dashscope.aliyuncs.com/compatible-mode/v1')
-
-            if api_key_env and api_key_env not in ['your_dashscope_api_key_here', '***']:
-                self.openai_client = openai.OpenAI(
-                    api_key=api_key_env,
-                    base_url=api_base_env
-                )
-                self.dashscope_api_key = api_key_env
-                self.provider = 'dashscope'
-                logger.info(f"✅ DashScope 客户端初始化成功（模型：{self.model}）")
-                logger.info(f"   API Base: {api_base_env}")
-                return
-
-        # 从 config 直接创建 OpenAI 客户端（provider: openai + api_base + api_key）
-        if OPENAI_AVAILABLE and not self.openai_client and not self.anthropic_client:
-            config_api_base = self.config.get('api_base', '')
-            config_api_key = self.config.get('api_key', '')
-            if config_api_base and config_api_key and config_api_key not in ['', 'unused']:
-                # 🔑 增强超时控制：分离连接/读取/写入超时
-                import httpx
-                timeout_config = httpx.Timeout(
-                    connect=30.0,  # 连接超时30秒
-                    read=self.config.get('timeout', 240),  # 读取超时（可配置）
-                    write=30.0,  # 写入超时30秒
-                    pool=30.0   # 连接池超时30秒
-                )
-                self.openai_client = openai.OpenAI(
-                    api_key=config_api_key,
-                    base_url=config_api_base,
-                    timeout=timeout_config,
-                )
-                self.provider = 'openai'
-                logger.info(f"✅ OpenAI 客户端初始化成功（模型: {self.model}）")
-                logger.info(f"   API Base: {config_api_base}")
-                logger.info(f"   超时配置: 连接={timeout_config.connect}s, 读取={timeout_config.read}s")
-                return
-
-        # 后备：使用 Hermes 内置 LLM
-        if not self.openai_client and not self.anthropic_client:
-            logger.warning(f"⚠️  未配置有效 API，使用 Hermes 内置 LLM")
-            self.use_hermes_llm = True
-            self.model = 'qwen3.5-plus'
-            logger.info(f"   模型：{self.model}")
+        # ponytail: Step 3 - 无OpenAI SDK，抛出异常
+        raise RuntimeError("需要OpenAI SDK支持（pip install openai）")
 
     def _auto_select_model(self):
         """自动选择最佳可用模型"""
@@ -737,65 +674,10 @@ class LLMClient:
                         logger.error(f"❌ API调用异常: {e}")
                         return None
 
-                # 🔑 Anthropic 客户端（备用）
-                elif self.anthropic_client and current_model != "hermes-local":
-                    try:
-                        system_content = ""
-                        user_messages = []
-
-                        for msg in messages:
-                            if msg['role'] == 'system':
-                                system_content = msg['content']
-                            else:
-                                user_messages.append(msg)
-
-                        system_blocks = [
-                            {
-                                "type": "text",
-                                "text": system_content,
-                                "cache_control": {"type": "ephemeral"}
-                            }
-                        ] if system_content else None
-
-                        response = self.anthropic_client.messages.create(
-                            model=current_model,
-                            max_tokens=max_tokens,
-                            temperature=self.temperature,
-                            system=system_blocks,
-                            messages=user_messages,
-                        )
-
-                        text = ""
-                        for block in response.content:
-                            if hasattr(block, "text"):
-                                text += block.text
-
-                        return text if text else None
-
-                    except Exception as e:
-                        error_str = str(e)
-
-                        if self._is_quota_exhausted(error_str):
-                            current_model_switches += 1
-                            if self.switch_to_next_model(f"额度耗尽: {current_model}"):
-                                continue
-                            else:
-                                break
-
-                        elif '429' in error_str or 'throttling' in error_str.lower():
-                            time.sleep(5)
-                            current_model_switches += 1
-                            if self.switch_to_next_model(f"限流"):
-                                continue
-                            else:
-                                break
-
-                        self.failed_models.add(current_model)
-                        return None
-
-                # 无可用客户端时直接失败，不再回退到文件型本地模式
+                # ponytail: 移除Anthropic客户端分支（已简化为只支持OpenAI兼容接口）
+                # 无可用客户端时直接失败
                 else:
-                    logger.error("❌ 未配置可用的远程 LLM 客户端")
+                    logger.error("❌ 未配置可用的 LLM 客户端")
                     return None
 
             # 检查是否成功切换到新源
@@ -1461,15 +1343,7 @@ class AsyncLLMClient(LLMClient):
             except Exception as e:
                 logger.warning(f"⚠️ AsyncOpenAI 初始化失败: {e}")
 
-        if ASYNC_ANTHROPIC_AVAILABLE and self.anthropic_client:
-            try:
-                self.async_anthropic_client = AsyncAnthropic(
-                    api_key=os.environ.get('ANTHROPIC_API_KEY', ''),
-                    base_url=os.environ.get('ANTHROPIC_BASE_URL', ''),
-                )
-                logger.info("✅ AsyncAnthropic 客户端初始化成功")
-            except Exception as e:
-                logger.warning(f"⚠️ AsyncAnthropic 初始化失败: {e}")
+        # ponytail: 移除AsyncAnthropic客户端初始化（已简化）
 
     async def _call_llm_async(self, messages: List[Dict], max_tokens: int = None) -> str:
         """
