@@ -206,6 +206,7 @@ class BookMetadataEnricher:
             return cached
 
         metadata = None
+        original_language = self._detect_language(title, author)  # 检测原始语言
 
         # ponytail: 中英文切换策略
         # 1. 尝试原始输入
@@ -225,6 +226,15 @@ class BookMetadataEnricher:
             title_pinyin = self._to_pinyin_simple(title)
             logger.info(f"尝试拼音搜索: {title} → {title_pinyin}")
             metadata = await self._search_by_title_author(title_pinyin, author)
+
+        # ponytail: 🔑 关键修复 - API返回英文数据时，保留原始中文
+        # 如果原始书籍是中文，但API返回了英文元数据，强制回退到LLM
+        if metadata and metadata.get("source") == "openlibrary":
+            # 检查API返回的元数据是否与原始语言不一致
+            api_title_lang = self._detect_language(metadata.get("title", ""))
+            if original_language == "zh" and api_title_lang != "zh":
+                logger.info(f"⚠️ OpenLibrary返回英文数据，原始书籍为中文，回退到LLM")
+                metadata = None  # 清除英文元数据，强制使用LLM
 
         # ponytail: API 都无数据 → 使用 LLM fallback
         if not metadata and llm_client:
@@ -488,6 +498,26 @@ class BookMetadataEnricher:
     def _contains_chinese(self, text: str) -> bool:
         """检测文本是否包含中文"""
         return any("一" <= char <= "鿿" for char in text)
+
+    def _detect_language(self, title: str, author: str = "") -> str:
+        """
+        检测书籍原始语言（中文或英文）
+
+        Args:
+            title: 书名
+            author: 作者名（可选）
+
+        Returns:
+            str: "zh"（中文）或 "en"（英文）
+        """
+        combined = f"{title} {author}"
+
+        # 如果标题或作者包含中文，判定为中文书籍
+        if self._contains_chinese(combined):
+            return "zh"
+
+        # 否则判定为英文书籍
+        return "en"
 
     def _to_pinyin_simple(self, text: str) -> str:
         """

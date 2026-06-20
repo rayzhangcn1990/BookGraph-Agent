@@ -212,8 +212,8 @@ class LLMClient:
                     if self.openai_client:
                         self.provider = 'anthropic'
 
-                        print(f"✅ 多源API初始化成功（源：{source.name}）")
-                        print(f"   API Base: {source.api_base}")
+                        logger.info(f"✅ 多源API初始化成功（源：{source.name}）")
+                        logger.info(f"   API Base: {source.api_base}")
 
                         # 🔑 使用模型池管理器选择模型（替换旧逻辑）
                         self._select_model_from_pool()
@@ -252,8 +252,8 @@ class LLMClient:
                         timeout=180,
                     )
                 self.provider = 'anthropic'
-                print(f"✅ 客户端初始化成功（模型：{self.model}）")
-                print(f"   API Base: {base_url_env}")
+                logger.info(f"✅ 客户端初始化成功（模型：{self.model}）")
+                logger.info(f"   API Base: {base_url_env}")
                 return
 
         # 尝试 DashScope
@@ -268,8 +268,8 @@ class LLMClient:
                 )
                 self.dashscope_api_key = api_key_env
                 self.provider = 'dashscope'
-                print(f"✅ DashScope 客户端初始化成功（模型：{self.model}）")
-                print(f"   API Base: {api_base_env}")
+                logger.info(f"✅ DashScope 客户端初始化成功（模型：{self.model}）")
+                logger.info(f"   API Base: {api_base_env}")
                 return
 
         # 从 config 直接创建 OpenAI 客户端（provider: openai + api_base + api_key）
@@ -291,17 +291,17 @@ class LLMClient:
                     timeout=timeout_config,
                 )
                 self.provider = 'openai'
-                print(f"✅ OpenAI 客户端初始化成功（模型: {self.model}）")
-                print(f"   API Base: {config_api_base}")
-                print(f"   超时配置: 连接={timeout_config.connect}s, 读取={timeout_config.read}s")
+                logger.info(f"✅ OpenAI 客户端初始化成功（模型: {self.model}）")
+                logger.info(f"   API Base: {config_api_base}")
+                logger.info(f"   超时配置: 连接={timeout_config.connect}s, 读取={timeout_config.read}s")
                 return
 
         # 后备：使用 Hermes 内置 LLM
         if not self.openai_client and not self.anthropic_client:
-            print(f"⚠️  未配置有效 API，使用 Hermes 内置 LLM")
+            logger.warning(f"⚠️  未配置有效 API，使用 Hermes 内置 LLM")
             self.use_hermes_llm = True
             self.model = 'qwen3.5-plus'
-            print(f"   模型：{self.model}")
+            logger.info(f"   模型：{self.model}")
 
     def _auto_select_model(self):
         """自动选择最佳可用模型"""
@@ -312,15 +312,15 @@ class LLMClient:
         available_models = self.config.get('available_models', [])
 
         # 🧪 调试：打印配置读取
-        print(f"[DEBUG] config_model: {config_model}")
-        print(f"[DEBUG] available_models: {len(available_models)} items")
+        logger.debug(f"[DEBUG] config_model: {config_model}")
+        logger.debug(f"[DEBUG] available_models: {len(available_models)} items")
 
         # 如果配置有验证可用模型池，优先使用
         if available_models:
             # 使用验证可用的第一个模型
             first_available = available_models[0]
             self.model = first_available.get('model', config_model)
-            print(f"🎯 使用验证可用模型: {self.model}")
+            logger.info(f"🎯 使用验证可用模型: {self.model}")
             return
 
         # 如果配置明确指定了模型，直接使用
@@ -565,14 +565,14 @@ class LLMClient:
         # 查找响应文件
         response_files = sorted(Path('.').glob('response_*.json'))
         if not response_files:
-            print("⚠️  未找到响应文件，请先创建 response_*.json 文件")
+            logger.warning("⚠️  未找到响应文件，请先创建 response_*.json 文件")
             return None
-        
+
         # 使用第一个响应文件
         response_file = response_files[0]
-        print(f"\n{'='*60}")
-        print(f"📝 [从文件读取 LLM 响应: {response_file}]")
-        print(f"{'='*60}")
+        logger.info(f"\n{'='*60}")
+        logger.info(f"📝 [从文件读取 LLM 响应: {response_file}]")
+        logger.info(f"{'='*60}")
         
         try:
             with open(response_file, 'r', encoding='utf-8') as f:
@@ -580,11 +580,11 @@ class LLMClient:
             
             # 删除已使用的文件
             response_file.unlink()
-            print(f"✅ 读取响应成功，长度：{len(response)} 字符")
-            print(f"   已删除文件：{response_file}")
+            logger.info(f"✅ 读取响应成功，长度：{len(response)} 字符")
+            logger.info(f"   已删除文件：{response_file}")
             return response
         except Exception as e:
-            print(f"❌ 读取响应文件失败: {e}")
+            logger.error(f"❌ 读取响应文件失败: {e}")
             return None
     
     def _call_llm(self, messages: List[Dict], max_tokens: int = None) -> str:
@@ -985,7 +985,7 @@ class LLMClient:
             return result
             
         except json.JSONDecodeError as e:
-            print(f"⚠️ JSON 解析失败：{e}")
+            logger.warning(f"⚠️ JSON 解析失败：{e}")
             return {"raw_response": response}
 
     def _normalize_book_graph_data(self, data: Dict, metadata: Dict) -> Dict:
@@ -1377,7 +1377,7 @@ class LLMClient:
             return DisciplineType(discipline_name)
         except ValueError:
             # 如果无法匹配，返回默认值
-            print(f"⚠️ 无法识别学科 '{discipline_name}'，使用默认值：哲学")
+            logger.warning(f"⚠️ 无法识别学科 '{discipline_name}'，使用默认值：哲学")
             return DisciplineType.哲学
 
     def update_discipline_graph(

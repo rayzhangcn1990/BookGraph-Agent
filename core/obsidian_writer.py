@@ -4,6 +4,7 @@ Obsidian Writer - Obsidian 文件写入模块
 负责将知识图谱写入 Obsidian Vault，管理目录结构和文件备份。
 """
 
+import logging
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from datetime import datetime
@@ -12,6 +13,8 @@ import os
 import re
 
 from schemas.book_graph_schema import BookGraph, DisciplineType
+
+logger = logging.getLogger("BookGraph-Agent")
 
 
 class ObsidianWriter:
@@ -50,7 +53,7 @@ class ObsidianWriter:
         
         # 验证 Vault 路径
         if not self.vault_path.exists():
-            print(f"⚠️ Obsidian Vault 路径不存在：{self.vault_path}")
+            logger.warning(f"⚠️ Obsidian Vault 路径不存在：{self.vault_path}")
 
     def write_book_graph(
         self, 
@@ -99,7 +102,7 @@ class ObsidianWriter:
 
             # Rename临时文件为正式文件
             Path(temp_file.name).rename(file_path)
-            print(f"✅ 书籍图谱已写入：{file_path}")
+            logger.info(f"✅ 书籍图谱已写入：{file_path}")
 
         except Exception as e:
             # 写入失败，清理临时文件
@@ -151,7 +154,7 @@ class ObsidianWriter:
         if not file_path.exists():
             skeleton = "---\n" + f"title: {book_title}\ndiscipline: {discipline}\ncreated: {datetime.now().strftime('%Y-%m-%d')}\ntype: book-graph\n---\n\n" + f"{target_header}\n\n{section_content}\n\n---\n\n*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}"
             file_path.write_text(skeleton.replace("\n", "\n"), encoding="utf-8")
-            print(f"✅ 创建骨架 → {file_path.name}")
+            logger.info(f"✅ 创建骨架 → {file_path.name}")
             return file_path.resolve()
         
         content = file_path.read_text(encoding="utf-8")
@@ -171,7 +174,7 @@ class ObsidianWriter:
             new_content = re.sub(r"\*最后更新\*: .*", f"*最后更新*: {datetime.now().strftime('%Y-%m-%d %H:%M')}", new_content)
             
             file_path.write_text(new_content, encoding="utf-8")
-            print(f"✅ 更新 [{section_name}] → {file_path.name}")
+            logger.info(f"✅ 更新 [{section_name}] → {file_path.name}")
         
         return file_path.resolve()
 
@@ -206,8 +209,8 @@ class ObsidianWriter:
         # 写入文件
         with open(file_path, 'w', encoding='utf-8') as f:
             f.write(content)
-        
-        print(f"✅ 学科图谱已写入：{file_path}")
+
+        logger.info(f"✅ 学科图谱已写入：{file_path}")
         return file_path.resolve()
 
     def ensure_discipline_structure(self, discipline: str) -> None:
@@ -229,8 +232,8 @@ class ObsidianWriter:
             gitkeep = dir_path / ".gitkeep"
             if not gitkeep.exists():
                 gitkeep.touch()
-        
-        print(f"✅ 学科目录结构已确保：{discipline_path}")
+
+        logger.info(f"✅ 学科目录结构已确保：{discipline_path}")
 
     def read_existing_discipline_graph(self, discipline: str) -> Optional[str]:
         """
@@ -252,7 +255,7 @@ class ObsidianWriter:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
         except Exception as e:
-            print(f"⚠️ 读取学科图谱失败：{e}")
+            logger.warning(f"⚠️ 读取学科图谱失败：{e}")
             return None
 
     def get_all_books_in_discipline(self, discipline: str) -> List[str]:
@@ -306,31 +309,37 @@ class ObsidianWriter:
         # 默认路径
         return Path(self.graph_root) / discipline
 
-    def _sanitize_filename(self, name: str, max_length: int = 100) -> str:
+    def _sanitize_filename(self, name: str, max_length: int = 180) -> str:
         """
-        生成安全的文件名
-        
+        生成安全的文件名（优化版：保持与书籍名称一致性）
+
         Args:
             name: 原始名称
-            max_length: 最大文件名长度（默认 100，避免过长）
-            
+            max_length: 最大文件名长度（默认 180，扩展以保持完整性）
+
         Returns:
             str: 安全的文件名
         """
+        # ponytail: 优先保持书名完整性（而非截断）
+
         # 移除或替换非法字符
         illegal_chars = ['<', '>', ':', '"', '/', '\\', '|', '?', '*']
         for char in illegal_chars:
             name = name.replace(char, '_')
-        
+
         # 移除前后空格
         name = name.strip()
-        
-        # 限制长度（使用哈希保持唯一性）
-        if len(name) > max_length:
+
+        # 🔑 优化：仅在超长时添加哈希后缀（而非截断）
+        # macOS 文件名限制：255 bytes（UTF-8编码）
+        if len(name.encode('utf-8')) > max_length:
             import hashlib
             name_hash = hashlib.md5(name.encode()).hexdigest()[:8]
-            name = f"{name[:max_length-9]}_{name_hash}"
-        
+            # 截断到安全长度（保留哈希后缀空间）
+            safe_len = max_length - 9
+            encoded = name.encode('utf-8')[:safe_len]
+            name = encoded.decode('utf-8', errors='ignore').strip(' ._') + f"_{name_hash}"
+
         return name
 
     def _create_backup(self, file_path: Path) -> Path:
@@ -376,7 +385,7 @@ class ObsidianWriter:
             with open(file_path, 'r', encoding='utf-8') as f:
                 return f.read()
         except Exception as e:
-            print(f"⚠️ 读取书籍图谱失败：{e}")
+            logger.warning(f"⚠️ 读取书籍图谱失败：{e}")
             return None
 
     def delete_book_graph(self, discipline: str, book_title: str) -> bool:
@@ -405,10 +414,10 @@ class ObsidianWriter:
             # 创建备份后删除
             self._create_backup(file_path)
             file_path.unlink()
-            print(f"✅ 已删除书籍图谱：{book_title}")
+            logger.info(f"✅ 已删除书籍图谱：{book_title}")
             return True
         except Exception as e:
-            print(f"⚠️ 删除书籍图谱失败：{e}")
+            logger.warning(f"⚠️ 删除书籍图谱失败：{e}")
             return False
 
     def get_vault_stats(self) -> Dict:
