@@ -56,26 +56,42 @@ class ObsidianWriter:
             logger.warning(f"⚠️ Obsidian Vault 路径不存在：{self.vault_path}")
 
     def write_book_graph(
-        self, 
-        book_graph: BookGraph, 
-        markdown_content: str
+        self,
+        book_graph: BookGraph,
+        markdown_content: str,
+        source_book_path: Optional[Path] = None
     ) -> Path:
         """
         写入书籍知识图谱
-        
+
         Args:
             book_graph: 书籍知识图谱对象
             markdown_content: Markdown 内容
-            
+            source_book_path: 源书籍路径（用于推断输出目录）
+
         Returns:
             Path: 写入文件的绝对路径
         """
-        # 确定目标学科路径
-        discipline = book_graph.metadata.discipline.value
-        discipline_path = self._get_discipline_path(discipline)
-        
-        # 构建文件路径
-        books_dir = self.vault_path / discipline_path / self.subdirectories['books']
+        # 🔑 新增：根据源书籍路径推断输出目录
+        if source_book_path:
+            book_path_parts = source_book_path.parent.parts
+            if len(book_path_parts) >= 2:
+                # 获取上级文件夹名称和当前文件夹名称
+                parent_folder = book_path_parts[-2] if len(book_path_parts) >= 2 else ""
+                current_folder = book_path_parts[-1]
+                # 构建输出目录：~/文稿/知识体系/📚 知识图谱/{上级文件夹}/{当前文件夹}/书籍图谱
+                books_dir = self.vault_path / self.graph_root / parent_folder / current_folder / self.subdirectories['books']
+            else:
+                # 回退：使用学科路径
+                discipline = book_graph.metadata.discipline.value
+                discipline_path = self._get_discipline_path(discipline)
+                books_dir = self.vault_path / discipline_path / self.subdirectories['books']
+        else:
+            # 原有逻辑：使用学科路径
+            discipline = book_graph.metadata.discipline.value
+            discipline_path = self._get_discipline_path(discipline)
+            books_dir = self.vault_path / discipline_path / self.subdirectories['books']
+
         books_dir.mkdir(parents=True, exist_ok=True)
         
         # 生成安全的文件名

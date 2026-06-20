@@ -145,6 +145,36 @@ async def process_single_book_optimized(
     logger.info(f"📖 开始处理: {book_path.name}")
 
     try:
+        # 🔑 新增：检查是否已解析完成
+        obsidian_config = config.get('obsidian', {})
+        vault_path = Path(obsidian_config.get('vault_path', '')).expanduser()
+        graph_root = obsidian_config.get('graph_root', '📚 知识图谱')
+        books_subdir = obsidian_config.get('subdirectories', {}).get('books', '书籍图谱')
+
+        # 构建预期输出路径
+        book_path_parts = book_path.parent.parts
+        if len(book_path_parts) >= 2:
+            # 获取上级文件夹名称和当前文件夹名称
+            parent_folder = book_path_parts[-2] if len(book_path_parts) >= 2 else ""
+            current_folder = book_path_parts[-1]
+            # 构建输出目录：~/文稿/知识体系/📚 知识图谱/{上级文件夹}/{当前文件夹}/书籍图谱
+            output_dir = vault_path / graph_root / parent_folder / current_folder / books_subdir
+        else:
+            # 回退：使用学科路径
+            output_dir = vault_path / graph_root / discipline / books_subdir
+
+        # 检查是否已存在解析结果
+        expected_output = output_dir / f"{book_path.stem}.md"
+        if expected_output.exists():
+            logger.info(f"⏭️  已解析，跳过: {expected_output}")
+            return {
+                'success': True,
+                'skipped': True,
+                'output_path': str(expected_output),
+                'book': book_path.name,
+                'elapsed': 0
+            }
+
         # Step 0: 初始化全局并发池 + 质量门控
         global_concurrency_config = config.get('improvements', {}).get('global_concurrency', {})
         if global_concurrency_config.get('enabled', False):
@@ -392,7 +422,8 @@ async def process_single_book_optimized(
         graph_generator = GraphGenerator(config)
 
         markdown_content = graph_generator.generate_book_graph_markdown(book_graph)
-        output_path = obsidian_writer.write_book_graph(book_graph, markdown_content)
+        # 🔑 新增：传入源书籍路径用于推断输出目录
+        output_path = obsidian_writer.write_book_graph(book_graph, markdown_content, source_book_path=book_path)
 
         # 质量不达标时：生成修复清单（而非抛异常）
         if not quality_passed:
