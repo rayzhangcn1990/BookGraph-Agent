@@ -183,6 +183,7 @@ class BookGraphQualityChecker:
         '章节合并',        # LLM偷懒合并章节
         '空洞章节',        # 章节内容为空
         '模板化内容',      # 模板填充未修改
+        '章节缺失',        # 🔑 新增：章节编号不连续，存在缺失
     ]
 
     WARNING_ISSUES = [
@@ -328,7 +329,8 @@ class BookGraphQualityChecker:
         stats['chapter_discontinuity'] = discontinuity
 
         if discontinuity:
-            warnings.append(f"章节编号不连续：缺失章节 {discontinuity}")
+            # 🔑 修复：章节缺失是阻塞性问题，升级为 issue
+            issues.append(f"⛔ 章节缺失：缺失章节编号 {discontinuity}")
 
         # 检查章节内容质量
         empty_chapters = 0
